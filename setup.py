@@ -104,7 +104,7 @@ def fetch_fabric_versions():
     logger.debug("Fetching Fabric game versions...")
     resp = requests.get(url)
     resp.raise_for_status()
-    return [entry.get('version') for entry in resp.json()]
+    return [entry['version'] for entry in resp.json()]
 
 # Fetch Fabric loader versions for a game version
 def fetch_fabric_loader_versions(game_version: str):
@@ -167,8 +167,7 @@ class ServerSetupApp(tk.Tk):
         # Server type selector
         tk.Label(self, text="Server Type:").pack(pady=(20,0))
         self.server_var = tk.StringVar()
-        self.server_cb = ttk.Combobox(self, textvariable=self.server_var, state='readonly',
-                                      values=['Vanilla','Paper','Forge','Fabric','Proxy'])
+        self.server_cb = ttk.Combobox(self, textvariable=self.server_var, state='readonly', values=['Vanilla','Paper','Forge','Fabric','Proxy'])
         self.server_cb.current(0)
         self.server_cb.pack()
         self.server_cb.bind('<<ComboboxSelected>>', lambda e: self._update_versions())
@@ -178,7 +177,7 @@ class ServerSetupApp(tk.Tk):
         self.game_var = tk.StringVar()
         self.game_cb = ttk.Combobox(self, textvariable=self.game_var, state='readonly', width=50)
         self.game_cb.pack()
-        self.game_cb.bind('<<CombomboxSelected>>', lambda e: self._update_loader_versions())
+        self.game_cb.bind('<<ComboboxSelected>>', lambda e: self._update_loader_versions())
 
         # Loader version selector
         tk.Label(self, text="Loader Version:").pack(pady=(20,0))
@@ -213,7 +212,7 @@ class ServerSetupApp(tk.Tk):
         elif st == 'Fabric':
             games = sort_versions(fetch_fabric_versions())
         elif st == 'Proxy':
-            games = sort_versions(fetch_papermc_versions())
+            games = sort_versions(fetch_paper_versions())
 
         self.game_cb['values'] = games
         if games:
