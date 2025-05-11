@@ -1,0 +1,143 @@
+2025-05-11 12:58:59,882 - INFO - Launching application...
+2025-05-11 12:59:00,783 - DEBUG - Initializing Minecraft Server Setup GUI application...
+2025-05-11 12:59:00,941 - DEBUG - Detected operating system: Windows
+2025-05-11 12:59:00,942 - DEBUG - Detected system architecture: AMD64
+2025-05-11 12:59:00,942 - DEBUG - Creating GUI widgets...
+2025-05-11 12:59:00,950 - DEBUG - Minecraft version selector initialized.
+2025-05-11 12:59:00,951 - DEBUG - Server type selector initialized.
+2025-05-11 12:59:00,951 - DEBUG - Setup button created.
+2025-05-11 12:59:27,973 - INFO - User selected version: 1.20.4, server type: Paper
+2025-05-11 12:59:35,365 - DEBUG - Displayed selection message to user.
+2025-05-11 12:59:35,365 - DEBUG - Setup logic not yet implemented.
+2025-05-11 12:59:36,899 - INFO - User selected version: 1.20.4, server type: Paper
+2025-05-11 12:59:40,426 - DEBUG - Displayed selection message to user.
+2025-05-11 12:59:40,426 - DEBUG - Setup logic not yet implemented.
+2025-05-11 12:59:41,959 - INFO - Application closed.
+2025-05-11 13:04:55,309 - INFO - Launching application...
+2025-05-11 13:04:55,463 - DEBUG - Initializing Minecraft Server Setup GUI application...
+2025-05-11 13:04:55,535 - DEBUG - Detected operating system: Windows
+2025-05-11 13:04:55,535 - DEBUG - Detected system architecture: AMD64
+2025-05-11 13:04:55,535 - DEBUG - Creating GUI widgets...
+2025-05-11 13:04:55,539 - DEBUG - Minecraft version selector initialized.
+2025-05-11 13:04:55,540 - DEBUG - Server type selector initialized.
+2025-05-11 13:04:55,540 - DEBUG - Setup button created.
+2025-05-11 13:05:04,502 - INFO - User selected version: 1.20.4, server type: Paper
+2025-05-11 13:05:04,503 - DEBUG - Created working directory: minecraft_server_paper_1.20.4
+2025-05-11 13:05:04,529 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-05-11 13:05:06,010 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper/versions/1.20.4 HTTP/11" 200 None
+2025-05-11 13:05:06,014 - DEBUG - Starting download from https://api.papermc.io/v2/projects/paper/versions/1.20.4/builds/499/downloads/paper-1.20.4-499.jar to minecraft_server_paper_1.20.4\paper-1.20.4-499.jar
+2025-05-11 13:05:06,015 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-05-11 13:05:06,132 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper/versions/1.20.4/builds/499/downloads/paper-1.20.4-499.jar HTTP/11" 200 42781488
+2025-05-11 13:05:07,408 - DEBUG - Downloaded file to minecraft_server_paper_1.20.4\paper-1.20.4-499.jar
+2025-05-11 13:05:07,408 - DEBUG - Wrote eula.txt in minecraft_server_paper_1.20.4
+2025-05-11 13:05:07,409 - DEBUG - Generated start script minecraft_server_paper_1.20.4\start.bat
+2025-05-11 13:05:11,382 - INFO - Setup complete for Paper server at minecraft_server_paper_1.20.4
+2025-05-11 13:05:15,815 - INFO - Application closed.
+2025-05-11 13:07:13,467 - INFO - Launching application...
+2025-05-11 13:07:13,586 - DEBUG - Initializing Minecraft Server Setup GUI application...
+2025-05-11 13:07:13,643 - DEBUG - Detected operating system: Windows
+2025-05-11 13:07:13,643 - DEBUG - Detected system architecture: AMD64
+2025-05-11 13:07:13,643 - DEBUG - Creating GUI widgets...
+2025-05-11 13:07:13,646 - DEBUG - Fetching Minecraft version manifest...
+2025-05-11 13:07:13,649 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 13:07:13,886 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 13:07:13,903 - DEBUG - Fetched 813 Minecraft versions
+2025-05-11 13:07:13,904 - DEBUG - Populated version selector with live data.
+2025-05-11 13:07:13,905 - DEBUG - Server type selector initialized.
+2025-05-11 13:07:13,906 - DEBUG - Setup button created.
+2025-05-11 13:07:44,461 - INFO - User selected version: 1.21.5, server type: Paper
+2025-05-11 13:07:44,462 - DEBUG - Created working directory: minecraft_server_paper_1.21.5
+2025-05-11 13:07:44,463 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-05-11 13:07:45,959 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper/versions/1.21.5 HTTP/11" 200 None
+2025-05-11 13:07:45,960 - DEBUG - Starting download from https://api.papermc.io/v2/projects/paper/versions/1.21.5/builds/76/downloads/paper-1.21.5-76.jar to minecraft_server_paper_1.21.5\paper-1.21.5-76.jar
+2025-05-11 13:07:45,961 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-05-11 13:07:46,120 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper/versions/1.21.5/builds/76/downloads/paper-1.21.5-76.jar HTTP/11" 200 51412710
+2025-05-11 13:07:47,985 - DEBUG - Downloaded file to minecraft_server_paper_1.21.5\paper-1.21.5-76.jar
+2025-05-11 13:07:47,987 - DEBUG - Wrote eula.txt in minecraft_server_paper_1.21.5
+2025-05-11 13:07:47,988 - DEBUG - Generated start script minecraft_server_paper_1.21.5\start.bat
+2025-05-11 13:07:50,287 - INFO - Setup complete for Paper server at minecraft_server_paper_1.21.5
+2025-05-11 13:08:33,496 - INFO - Application closed.
+2025-05-11 14:45:25,524 - INFO - Launching application...
+2025-05-11 14:45:25,641 - DEBUG - Initializing GUI application...
+2025-05-11 14:45:25,735 - DEBUG - Detected OS: Windows
+2025-05-11 14:45:25,736 - DEBUG - Detected architecture: AMD64
+2025-05-11 14:45:25,736 - DEBUG - Creating GUI widgets...
+2025-05-11 14:45:25,740 - DEBUG - Fetching Minecraft version manifest...
+2025-05-11 14:45:25,744 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 14:45:25,988 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 14:45:26,021 - DEBUG - Populated versions for Vanilla: 813 entries
+2025-05-11 14:45:26,022 - DEBUG - Widgets created.
+2025-05-11 14:46:12,208 - INFO - Application closed.
+2025-05-11 14:46:26,158 - INFO - Launching application...
+2025-05-11 14:46:26,268 - DEBUG - Initializing GUI application...
+2025-05-11 14:46:26,323 - DEBUG - Detected OS: Windows
+2025-05-11 14:46:26,323 - DEBUG - Detected architecture: AMD64
+2025-05-11 14:46:26,323 - DEBUG - Creating GUI widgets...
+2025-05-11 14:46:26,327 - DEBUG - Fetching Minecraft version manifest...
+2025-05-11 14:46:26,330 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 14:46:26,529 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 14:46:26,547 - DEBUG - Populated versions for Vanilla: 813 entries
+2025-05-11 14:46:26,548 - DEBUG - Widgets created.
+2025-05-11 14:46:31,075 - DEBUG - Fetching Paper versions...
+2025-05-11 14:46:31,076 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-05-11 14:46:32,561 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper HTTP/11" 200 None
+2025-05-11 14:46:32,562 - DEBUG - Populated versions for Paper: 45 entries
+2025-05-11 14:46:41,785 - DEBUG - Fetching Minecraft version manifest...
+2025-05-11 14:46:41,787 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 14:46:41,998 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 14:46:42,012 - DEBUG - Populated versions for Vanilla: 813 entries
+2025-05-11 14:46:51,062 - DEBUG - Fetching Forge promotions...
+2025-05-11 14:46:51,064 - DEBUG - Starting new HTTPS connection (1): files.minecraftforge.net:443
+2025-05-11 14:46:51,740 - DEBUG - https://files.minecraftforge.net:443 "GET /maven/net/minecraftforge/forge/promotions_slim.json HTTP/11" 301 17
+2025-05-11 14:46:52,006 - DEBUG - https://files.minecraftforge.net:443 "GET /net/minecraftforge/forge/promotions_slim.json HTTP/11" 200 817
+2025-05-11 14:46:52,008 - DEBUG - Populated versions for Forge: 34 entries
+2025-05-11 14:47:14,275 - DEBUG - Fetching Fabric game versions...
+2025-05-11 14:47:14,276 - DEBUG - Starting new HTTPS connection (1): meta.fabricmc.net:443
+2025-05-11 14:47:14,805 - DEBUG - https://meta.fabricmc.net:443 "GET /v2/versions/game HTTP/11" 200 1576
+2025-05-11 14:47:14,808 - DEBUG - Populated versions for Fabric: 414 entries
+2025-05-11 14:50:44,230 - INFO - Application closed.
+2025-05-11 14:50:51,616 - INFO - Launching application...
+2025-05-11 14:50:51,733 - DEBUG - Initializing GUI application...
+2025-05-11 14:50:51,798 - DEBUG - Detected OS: Windows
+2025-05-11 14:50:51,798 - DEBUG - Detected architecture: AMD64
+2025-05-11 14:50:51,798 - DEBUG - Creating GUI widgets...
+2025-05-11 14:50:51,802 - DEBUG - Fetching Minecraft version manifest...
+2025-05-11 14:50:51,805 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 14:50:52,070 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 14:50:52,098 - DEBUG - Updated versions for Vanilla: games=813, loaders=0
+2025-05-11 14:52:15,021 - DEBUG - Fetching Paper versions...
+2025-05-11 14:52:15,023 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-05-11 14:52:16,517 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper HTTP/11" 200 None
+2025-05-11 14:52:16,518 - DEBUG - Updated versions for Paper: games=45, loaders=0
+2025-05-11 14:52:27,477 - DEBUG - Fetching Fabric game versions...
+2025-05-11 14:52:27,479 - DEBUG - Starting new HTTPS connection (1): meta.fabricmc.net:443
+2025-05-11 14:52:29,107 - DEBUG - https://meta.fabricmc.net:443 "GET /v2/versions/game HTTP/11" 200 1576
+2025-05-11 14:52:29,109 - DEBUG - Fetching Fabric loader versions...
+2025-05-11 14:52:29,109 - DEBUG - Starting new HTTPS connection (1): meta.fabricmc.net:443
+2025-05-11 14:52:29,583 - DEBUG - https://meta.fabricmc.net:443 "GET /v2/versions/loader HTTP/11" 200 2427
+2025-05-11 14:52:29,586 - DEBUG - Updated versions for Fabric: games=414, loaders=0
+2025-05-11 14:52:31,041 - DEBUG - Fetching Fabric game versions...
+2025-05-11 14:52:31,042 - DEBUG - Starting new HTTPS connection (1): meta.fabricmc.net:443
+2025-05-11 14:52:31,559 - DEBUG - https://meta.fabricmc.net:443 "GET /v2/versions/game HTTP/11" 200 1576
+2025-05-11 14:52:31,561 - DEBUG - Fetching Fabric loader versions...
+2025-05-11 14:52:31,562 - DEBUG - Starting new HTTPS connection (1): meta.fabricmc.net:443
+2025-05-11 14:52:32,027 - DEBUG - https://meta.fabricmc.net:443 "GET /v2/versions/loader HTTP/11" 200 2427
+2025-05-11 14:52:32,031 - DEBUG - Updated versions for Fabric: games=414, loaders=0
+2025-05-11 14:52:56,004 - INFO - Application closed.
+2025-05-11 15:03:16,798 - DEBUG - Init GUI
+2025-05-11 15:03:16,889 - DEBUG - OS=Windows, ARCH=AMD64
+2025-05-11 15:03:16,899 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 15:03:17,215 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 15:03:34,038 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 15:03:34,258 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 15:03:40,404 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 15:03:40,624 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
+2025-05-11 15:08:49,191 - DEBUG - Initializing GUI application...
+2025-05-11 15:08:49,282 - DEBUG - Detected OS=Windows, ARCH=AMD64
+2025-05-11 15:09:02,648 - DEBUG - Initializing GUI application...
+2025-05-11 15:09:02,704 - DEBUG - Detected OS=Windows, ARCH=AMD64
+2025-05-11 15:10:48,883 - DEBUG - Initializing GUI application...
+2025-05-11 15:10:48,942 - DEBUG - Detected OS=Windows, ARCH=AMD64
+2025-05-11 15:10:48,949 - DEBUG - Fetching Minecraft version manifest...
+2025-05-11 15:10:48,952 - DEBUG - Starting new HTTPS connection (1): launchermeta.mojang.com:443
+2025-05-11 15:10:49,168 - DEBUG - https://launchermeta.mojang.com:443 "GET /mc/game/version_manifest.json HTTP/11" 200 None
