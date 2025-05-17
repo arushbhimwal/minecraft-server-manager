@@ -98,24 +98,42 @@ class ServerManager(QMainWindow):
         content_panel = QWidget()
         content_layout = QVBoxLayout(content_panel)
         
-        # Top Control Bar
-        top_layout = QHBoxLayout()
+        # Server Creation Controls
+        creation_layout = QHBoxLayout()
+        
+        # Path Selection
+        self.server_path = QLineEdit()
+        self.server_path.setPlaceholderText("Select server directory...")
+        btn_browse = QPushButton("Browse")
+        btn_browse.clicked.connect(self.select_server_directory)
+        
+        # Create Server Button
+        btn_create = QPushButton("Create New Server")
+        btn_create.clicked.connect(self.create_new_server)
+        
+        creation_layout.addWidget(QLabel("Server Location:"))
+        creation_layout.addWidget(self.server_path)
+        creation_layout.addWidget(btn_browse)
+        creation_layout.addWidget(btn_create)
+        content_layout.addLayout(creation_layout)
+
+        # Server Configuration
+        config_layout = QHBoxLayout()
         self.java_combo = QComboBox()
         self.java_combo.addItems(self.java_versions)
-        top_layout.addWidget(QLabel("Java Version:"))
-        top_layout.addWidget(self.java_combo)
+        config_layout.addWidget(QLabel("Java Version:"))
+        config_layout.addWidget(self.java_combo)
         
         self.loader_combo = QComboBox()
         self.loader_combo.addItems(self.loaders)
         self.loader_combo.currentTextChanged.connect(self.update_versions)
-        top_layout.addWidget(QLabel("Server Loader:"))
-        top_layout.addWidget(self.loader_combo)
+        config_layout.addWidget(QLabel("Server Loader:"))
+        config_layout.addWidget(self.loader_combo)
         
         self.version_combo = QComboBox()
-        top_layout.addWidget(QLabel("Minecraft Version:"))
-        top_layout.addWidget(self.version_combo)
-        
-        content_layout.addLayout(top_layout)
+        config_layout.addWidget(QLabel("Minecraft Version:"))
+        config_layout.addWidget(self.version_combo)
+        content_layout.addLayout(config_layout)
 
         # Progress Bar
         self.progress = QProgressBar()
@@ -163,7 +181,21 @@ class ServerManager(QMainWindow):
         main_layout.addWidget(content_panel, stretch=3)
         self.update_controls()
 
+    def select_server_directory(self):
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Server Directory",
+            QDir.homePath(),
+            QFileDialog.ShowDirsOnly
+        )
+        if path:
+            self.server_path.setText(path)
+
     def create_new_server(self):
+        if not self.server_path.text():
+            QMessageBox.warning(self, "Error", "Please select a server directory first!")
+            return
+
         server_name, ok = QInputDialog.getText(
             self, 
             "New Server", 
@@ -175,7 +207,7 @@ class ServerManager(QMainWindow):
             self.setup_server(server_name)
 
     def setup_server(self, name):
-        server_dir = os.path.join(os.getcwd(), "servers", name)
+        server_dir = os.path.join(self.server_path.text(), name)
         os.makedirs(server_dir, exist_ok=True)
 
         loader = self.loader_combo.currentText()
