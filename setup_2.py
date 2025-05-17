@@ -1,324 +1,247 @@
 #!/usr/bin/env python3
 """
 Minecraft Server Manager
-A PySide6-based GUI application to configure and run Minecraft servers.
+Single-file setup script with a tile-based home page GUI using PySide6.
 Features:
-- Loader selection (Vanilla, Paper)
-- Version fetching via APIs
-- Java detection and prompting
-- Optional Docker deployment
-- Embedded RCON console
-- Mod/Plugin management via Modrinth and CurseForge
-- Profile persistence
-- MVC-style modular structure
+ - Server Instances (create with version/download, start, stop, restart)
+ - CLI Console for managing plugins/mods
+ - File Manager for server files
 """
 import sys
-import os
 import json
 import subprocess
-import webbrowser
-import shutil
-from pathlib import Path
-
 import requests
+from pathlib import Path
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QTabWidget,
-    QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QPushButton, QCheckBox, QLineEdit, QListWidget,
-    QTextEdit, QMessageBox, QStatusBar, QInputDialog
+    QApplication, QMainWindow, QWidget, QStackedWidget, QGridLayout,
+    QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QListWidget,
+    QListWidgetItem, QInputDialog, QMessageBox, QFileDialog, QComboBox
 )
 from PySide6.QtGui import QIcon
+import qdarktheme
 
-# Optional dependencies
-try:
-    import docker
-except ImportError:
-    docker = None
+CONFIG_PATH = Path.home() / ".mcs_manager" / "instances.json"
 
-try:
-    from mcrcon import MCRcon
-except ImportError:
-    MCRcon = None
+# Utility functions
+def load_instances():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if CONFIG_PATH.exists():
+        return json.loads(CONFIG_PATH.read_text())
+    return {}
 
-CONFIG_DIR = Path.home() / ".minecraft_server_manager"
-CONFIG_DIR.mkdir(exist_ok=True)
-PROFILES_FILE = CONFIG_DIR / "profiles.json"
+def save_instances(instances):
+    CONFIG_PATH.write_text(json.dumps(instances, indent=2))
 
-# Utilities
+# Instance control
+class ServerInstance:
+    def __init__(self, name, path, process=None):
+        self.name = name
+        self.path = path
+        self.process = process
 
-def check_java(required_major=17):
-    """Return (installed: bool, version_info: str)"""
-    try:
-        result = subprocess.run(["java", "-version"], capture_output=True, text=True)
-        ver_line = result.stderr.splitlines()[0]
-        import re
-        match = re.search(r"version \"(\d+)(?:\\.\d+)*\"", ver_line)
-        if match and int(match.group(1)) >= required_major:
-            return True, ver_line
-        return False, ver_line
-    except Exception:
-        return False, ""
+    def start(self):
+        if self.process and self.process.poll() is None:
+            return False
+        cmd = ["java", "-jar", "server.jar", "nogui"]
+        self.process = subprocess.Popen(cmd, cwd=self.path)
+        return True
 
-# API modules
-class VersionFetcher:
-    MOJANG_MANIFEST = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
-    PAPER_API = "https://api.papermc.io/v2/projects/paper"
+    def stop(self):
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            return True
+        return False
 
-    @staticmethod
-    def fetch_vanilla():
-        resp = requests.get(VersionFetcher.MOJANG_MANIFEST)
-        data = resp.json()
-        return [v["id"] for v in data.get("versions", [])]
+    def restart(self):
+        stopped = self.stop()
+        started = self.start()
+        return stopped and started
 
-    @staticmethod
-    def fetch_paper():
-        resp = requests.get(f"{VersionFetcher.PAPER_API}/versions")
-        data = resp.json()
-        return data.get("versions", [])
-
-# Mod/Plugin manager
-class ModManager:
-    MODRINTH_SEARCH = "https://api.modrinth.com/v2/search"
-    CURSEFORGE_SEARCH = "https://api.curseforge.com/v1/mods/search"
-
-    def __init__(self):
-        self.curseforge_key = os.getenv("CURSEFORGE_API_KEY", "")
-
-    def search_modrinth(self, query: str):
-        params = {"query": query, "limit": 20}
-        resp = requests.get(self.MODRINTH_SEARCH, params=params)
-        return resp.json().get("hits", [])
-
-    def search_curseforge(self, query: str):
-        headers = {"x-api-key": self.curseforge_key}
-        params = {"search": query, "gameId": 432}
-        resp = requests.get(self.CURSEFORGE_SEARCH, headers=headers, params=params)
-        return resp.json().get("data", [])
-
-# Docker manager
-class DockerManager:
-    def __init__(self):
-        if docker:
-            self.client = docker.from_env()
-        else:
-            self.client = None
-
-    def run_container(self, image: str, volumes: dict):
-        if not self.client:
-            raise RuntimeError("Docker SDK not installed")
-        return self.client.containers.run(image, detach=True, volumes=volumes)
-
-# RCON console
-class ConsoleClient:
-    def __init__(self, host: str, port: int, password: str):
-        self.host = host
-        self.port = port
-        self.password = password
-
-    def send(self, command: str) -> str:
-        if not MCRcon:
-            return "MCRcon library not available"
-        with MCRcon(self.host, self.password, port=self.port) as mcr:
-            return mcr.command(command)
-
-# GUI Tabs
-class ServerSetupTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout()
-
-        self.loader_combo = QComboBox()
-        self.loader_combo.addItems(["Vanilla", "Paper"])
-        self.loader_combo.currentTextChanged.connect(self.on_loader_change)
-        layout.addWidget(QLabel("Server Loader:"))
-        layout.addWidget(self.loader_combo)
-
-        self.version_combo = QComboBox()
-        layout.addWidget(QLabel("Minecraft Version:"))
-        layout.addWidget(self.version_combo)
-
-        installed, info = check_java()
-        self.java_label = QLabel(f"Java: {info if installed else 'Not found/old'}")
-        layout.addWidget(self.java_label)
-        if not installed:
-            btn = QPushButton("Download Java")
-            btn.clicked.connect(lambda: webbrowser.open("https://adoptium.net/"))
-            layout.addWidget(btn)
-
-        self.docker_checkbox = QCheckBox("Use Docker")
-        layout.addWidget(self.docker_checkbox)
-
-        create_btn = QPushButton("Create Server")
-        create_btn.clicked.connect(self.create_server)
-        layout.addWidget(create_btn)
-
-        self.setLayout(layout)
-        self.on_loader_change(self.loader_combo.currentText())
-
-    def on_loader_change(self, loader_name: str):
-        self.version_combo.clear()
-        try:
-            versions = (
-                VersionFetcher.fetch_paper() if loader_name.lower() == "paper"
-                else VersionFetcher.fetch_vanilla()
-            )
-            self.version_combo.addItems(versions)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to fetch versions: {e}")
-
-    def create_server(self):
-        loader = self.loader_combo.currentText().lower()
-        version = self.version_combo.currentText()
-        target = Path.cwd() / f"minecraft_server_{loader}_{version}"
-        target.mkdir(exist_ok=True)
-
-        # Download server jar
-        if loader == "paper":
-            url = (
-                f"https://api.papermc.io/v2/projects/paper/versions/{version}/"
-                f"builds/last/downloads/paper-{version}.jar"
-            )
-        else:
-            manifest = requests.get(VersionFetcher.MOJANG_MANIFEST).json()
-            item = next(v for v in manifest["versions"] if v["id"] == version)
-            meta = requests.get(item["url"]).json()
-            url = meta["downloads"]["server"]["url"]
-        jar_path = target / "server.jar"
-        with requests.get(url, stream=True) as r:
-            with open(jar_path, 'wb') as f:
-                shutil.copyfileobj(r.raw, f)
-
-        # Write eula.txt and default properties
-        (target / "eula.txt").write_text("eula=true")
-        props = target / "server.properties"
-        if not props.exists(): props.write_text("# Generated by Minecraft Server Manager\n")
-
-        QMessageBox.information(self, "Success", f"Server created at {target}")
-
-class ModPluginTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout()
-        self.search_bar = QLineEdit(placeholderText="Search mods/plugins...")
-        layout.addWidget(self.search_bar)
-
-        btn_box = QHBoxLayout()
-        self.modrinth_btn = QPushButton("Search Modrinth")
-        self.curseforge_btn = QPushButton("Search CurseForge")
-        btn_box.addWidget(self.modrinth_btn)
-        btn_box.addWidget(self.curseforge_btn)
-        layout.addLayout(btn_box)
-
-        self.results_list = QListWidget()
-        layout.addWidget(self.results_list)
-        self.setLayout(layout)
-
-        self.manager = ModManager()
-        self.modrinth_btn.clicked.connect(self.search_modrinth)
-        self.curseforge_btn.clicked.connect(self.search_curseforge)
-
-    def search_modrinth(self):
-        query = self.search_bar.text().strip()
-        self.results_list.clear()
-        for mod in self.manager.search_modrinth(query):
-            self.results_list.addItem(f"{mod['title']} (v{mod['latest_version']}) - {mod['project_id']}")
-
-    def search_curseforge(self):
-        query = self.search_bar.text().strip()
-        self.results_list.clear()
-        for mod in self.manager.search_curseforge(query):
-            self.results_list.addItem(f"{mod['slug']} (ID {mod['id']})")
-
-class ConsoleTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout()
-        self.log = QTextEdit(readOnly=True)
-        layout.addWidget(self.log)
-
-        h = QHBoxLayout()
-        self.cmd_input = QLineEdit()
-        send_btn = QPushButton("Send")
-        h.addWidget(self.cmd_input)
-        h.addWidget(send_btn)
-        layout.addLayout(h)
-
-        self.setLayout(layout)
-        self.console = ConsoleClient('localhost', 25575, 'changeme')
-        send_btn.clicked.connect(self.send_cmd)
-
-    def send_cmd(self):
-        cmd = self.cmd_input.text().strip()
-        if not cmd: return
-        resp = self.console.send(cmd)
-        self.log.append(f"> {cmd}\n{resp}\n")
-
-class SettingsTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Saved Profiles:"))
-        self.list = QListWidget()
-        layout.addWidget(self.list)
-        load_btn = QPushButton("Load Profile")
-        save_btn = QPushButton("Save Current Profile")
-        layout.addWidget(load_btn)
-        layout.addWidget(save_btn)
-        self.setLayout(layout)
-
-        load_btn.clicked.connect(self.load_profile)
-        save_btn.clicked.connect(self.save_profile)
-        self.load_profiles()
-
-    def load_profiles(self):
-        self.list.clear()
-        if PROFILES_FILE.exists():
-            data = json.loads(PROFILES_FILE.read_text())
-            for name in data.keys():
-                self.list.addItem(name)
-
-    def load_profile(self):
-        item = self.list.currentItem()
-        if not item: return
-        name = item.text()
-        data = json.loads(PROFILES_FILE.read_text()).get(name, {})
-        QMessageBox.information(self, "Profile Loaded", f"{name}: {data}")
-        # TODO: apply loaded settings to tabs
-
-    def save_profile(self):
-        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:")
-        if not ok or not name: return
-        profile = {
-            "loader": self.parent().widget(0).loader_combo.currentText(),
-            "version": self.parent().widget(0).version_combo.currentText(),
-            "use_docker": self.parent().widget(0).docker_checkbox.isChecked()
-        }
-        data = {}
-        if PROFILES_FILE.exists():
-            data = json.loads(PROFILES_FILE.read_text())
-        data[name] = profile
-        PROFILES_FILE.write_text(json.dumps(data, indent=2))
-        self.load_profiles()
-
+# Main Window
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Minecraft Server Manager")
-        self.setWindowIcon(QIcon("app_icon.png"))
-        self.resize(900, 700)
+        self.setWindowIcon(QIcon.fromTheme("server"))
+        self.resize(800, 600)
+        qdarktheme.setup_theme()
 
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
 
-        self.tabs.addTab(ServerSetupTab(), "Server Setup")
-        self.tabs.addTab(ModPluginTab(), "Mods/Plugins")
-        self.tabs.addTab(ConsoleTab(), "Console")
-        self.tabs.addTab(SettingsTab(), "Settings")
+        self.home_page = HomePage(self)
+        self.instances_page = InstancesPage(self)
+        self.console_page = ConsolePage(self)
+        self.filemgr_page = FileManagerPage(self)
 
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
+        for page in (self.home_page, self.instances_page, self.console_page, self.filemgr_page):
+            self.stack.addWidget(page)
 
-if __name__ == "__main__":
+        self.status = self.statusBar()
+
+    def navigate(self, page):
+        self.stack.setCurrentWidget(page)
+
+# Home Page
+class HomePage(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        layout = QGridLayout()
+        layout.setSpacing(20)
+        btn_instances = tile_button("Instances", "overview-server")
+        btn_instances.clicked.connect(lambda: parent.navigate(parent.instances_page))
+        btn_console = tile_button("CLI Console", "utilities-terminal")
+        btn_console.clicked.connect(lambda: parent.navigate(parent.console_page))
+        btn_files = tile_button("File Manager", "folder")
+        btn_files.clicked.connect(lambda: parent.navigate(parent.filemgr_page))
+        placeholder = tile_button("Mods/Plugins", "application-x-executable")
+        placeholder.setEnabled(False)
+        layout.addWidget(btn_instances, 0, 0)
+        layout.addWidget(btn_console, 0, 1)
+        layout.addWidget(btn_files, 1, 0)
+        layout.addWidget(placeholder, 1, 1)
+        self.setLayout(layout)
+
+def tile_button(text, icon_name):
+    btn = QPushButton(text)
+    btn.setIcon(QIcon.fromTheme(icon_name))
+    btn.setMinimumSize(200, 150)
+    btn.setStyleSheet(
+        "QPushButton { font-size: 18px; border: 2px solid #555; border-radius: 10px; }"
+        "QPushButton:hover { background: #444; }"
+    )
+    return btn
+
+# Instances Page
+class InstancesPage(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.instances = {}
+        self.widgets()
+        self.load()
+
+    def widgets(self):
+        layout = QVBoxLayout()
+        title = QLabel("Server Instances")
+        title.setStyleSheet("font-size:24px;font-weight:bold;")
+        layout.addWidget(title)
+        self.list = QListWidget()
+        layout.addWidget(self.list)
+
+        btn_layout = QHBoxLayout()
+        for name in ("Create","Start","Stop","Restart","Delete","Back"):
+            btn = QPushButton(name)
+            btn.clicked.connect(getattr(self, name.lower()))
+            btn_layout.addWidget(btn)
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+
+    def load(self):
+        data = load_instances()
+        self.instances = {n: ServerInstance(n, p) for n, p in data.items()}
+        self.refresh_list()
+
+    def refresh_list(self):
+        self.list.clear()
+        for name, inst in self.instances.items():
+            status = "Running" if inst.process and inst.process.poll() is None else "Stopped"
+            item = QListWidgetItem(f"{name} — {status}")
+            self.list.addItem(item)
+
+    def selected(self):
+        item = self.list.currentItem()
+        if not item: return None
+        name = item.text().split(" — ")[0]
+        return self.instances.get(name)
+
+    def create(self):
+        # Name & folder
+        name, ok = QInputDialog.getText(self, "Create Instance","Enter instance name:")
+        if not ok or not name: return
+        path = QFileDialog.getExistingDirectory(self, "Select server folder")
+        if not path: return
+        # Version selection
+        manifest = requests.get("https://launchermeta.mojang.com/mc/game/version_manifest.json").json()
+        versions = [v["id"] for v in manifest.get("versions",[])]
+        version, ok = QInputDialog.getItem(self, "Minecraft Version", "Select version:", versions, editable=False)
+        if not ok: return
+        # Download server jar
+        ver_info = next(v for v in manifest["versions"] if v["id"] == version)
+        jar_url = requests.get(ver_info["url"]).json()["downloads"]["server"]["url"]
+        r = requests.get(jar_url)
+        jar_path = Path(path) / "server.jar"
+        jar_path.write_bytes(r.content)
+        # Save instance
+        self.instances[name] = ServerInstance(name, path)
+        save_instances({n: i.path for n, i in self.instances.items()})
+        self.refresh_list()
+
+    def start(self): self._action(lambda inst: inst.start(), "start")
+    def stop(self): self._action(lambda inst: inst.stop(), "stop")
+    def restart(self): self._action(lambda inst: inst.restart(), "restart")
+    def delete(self):
+        inst = self.selected()
+        if not inst: return
+        if QMessageBox.question(self, "Delete","Remove instance permanently?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.instances.pop(inst.name)
+        save_instances({n: i.path for n, i in self.instances.items()})
+        self.refresh_list()
+
+    def back(self): self.parent.navigate(self.parent.home_page)
+
+    def _action(self, fn, action):
+        inst = self.selected()
+        if not inst: return
+        ok = fn(inst)
+        if not ok:
+            QMessageBox.warning(self, action.capitalize(), f"Failed to {action} server.")
+        self.refresh_list()
+
+# Console Page
+class ConsolePage(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        layout = QVBoxLayout()
+        self.log_output = QLabel("[Console placeholder]")
+        layout.addWidget(self.log_output)
+        back = QPushButton("Back to Home")
+        back.clicked.connect(lambda: parent.navigate(parent.home_page))
+        layout.addWidget(back)
+        self.setLayout(layout)
+
+# File Manager Page
+class FileManagerPage(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        layout = QVBoxLayout()
+        self.path_label = QLabel("No server selected")
+        layout.addWidget(self.path_label)
+        select = QPushButton("Select Server Folder")
+        select.clicked.connect(self.select_folder)
+        layout.addWidget(select)
+        open_btn = QPushButton("Open in File Browser")
+        open_btn.clicked.connect(self.open_folder)
+        layout.addWidget(open_btn)
+        back = QPushButton("Back to Home")
+        back.clicked.connect(lambda: parent.navigate(parent.home_page))
+        layout.addWidget(back)
+        self.setLayout(layout)
+        self.server_path = None
+
+    def select_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Select Server Directory")
+        if path:
+            self.server_path = path
+            self.path_label.setText(f"Server: {path}")
+
+    def open_folder(self):
+        if self.server_path:
+            subprocess.Popen(["xdg-open", self.server_path])
+
+# Entry point
+if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
