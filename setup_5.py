@@ -9,12 +9,17 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QTabWidget, QTextEdit,
     QLineEdit, QFileDialog, QMessageBox, QTreeView, QFileSystemModel,
-    QInputDialog, QListWidget, QListWidgetItem, QProgressBar
+    QInputDialog, QListWidget, QListWidgetItem, QProgressBar,
+    QScrollArea, QSizePolicy
 )
-from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import Qt, QThread, Signal, QDir, QTimer
+from PySide6.QtGui import QIcon, QAction, QPixmap, QImage
+from PySide6.QtCore import Qt, QThread, Signal, QDir, QTimer, QSize
 import qdarktheme
 from mcrcon import MCRcon
+
+# ========================
+# THREAD CLASSES
+# ========================
 
 class ServerThread(QThread):
     output = Signal(str)
@@ -53,6 +58,47 @@ class ServerThread(QThread):
         if self.process:
             self.process.terminate()
 
+class ModSearchThread(QThread):
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, query):
+        super().__init__()
+        self.query = query
+
+    def run(self):
+        try:
+            response = requests.get(
+                f"https://api.modrinth.com/v2/search?query={self.query}&facets=[[\"categories:forge\"]]"
+            )
+            response.raise_for_status()
+            data = response.json()
+            self.finished.emit(data['hits'])
+        except Exception as e:
+            self.error.emit(str(e))
+
+class ImageLoaderThread(QThread):
+    loaded = Signal(str, QPixmap)
+
+    def __init__(self, url, mod_id):
+        super().__init__()
+        self.url = url
+        self.mod_id = mod_id
+
+    def run(self):
+        try:
+            response = requests.get(self.url)
+            image = QImage()
+            image.loadFromData(response.content)
+            pixmap = QPixmap.fromImage(image)
+            self.loaded.emit(self.mod_id, pixmap)
+        except:
+            self.loaded.emit(self.mod_id, QPixmap())
+
+# ========================
+# MAIN APPLICATION
+# ========================
+
 class ServerManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -61,6 +107,8 @@ class ServerManager(QMainWindow):
         self.servers = {}
         self.current_server = None
         self.profiles_file = "profiles.json"
+        self.mod_icons = {}
+        self.current_mods = []
         
         self.setWindowTitle("Minecraft Server Manager")
         self.setGeometry(100, 100, 1200, 800)
@@ -73,7 +121,7 @@ class ServerManager(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        # Server List Panel
+        # Left Panel - Server List
         self.server_list_panel = QWidget()
         server_list_layout = QVBoxLayout(self.server_list_panel)
         
@@ -82,6 +130,7 @@ class ServerManager(QMainWindow):
         server_list_layout.addWidget(QLabel("Servers:"))
         server_list_layout.addWidget(self.server_list)
         
+        # Server Control Buttons
         self.btn_start = QPushButton("Start Server")
         self.btn_start.clicked.connect(self.start_server)
         self.btn_stop = QPushButton("Stop Server")
@@ -94,20 +143,16 @@ class ServerManager(QMainWindow):
         server_list_layout.addWidget(self.btn_delete)
         main_layout.addWidget(self.server_list_panel, stretch=1)
 
-        # Main Content Panel
+        # Right Panel - Main Content
         content_panel = QWidget()
         content_layout = QVBoxLayout(content_panel)
         
         # Server Creation Controls
         creation_layout = QHBoxLayout()
-        
-        # Path Selection
         self.server_path = QLineEdit()
         self.server_path.setPlaceholderText("Select server directory...")
         btn_browse = QPushButton("Browse")
         btn_browse.clicked.connect(self.select_server_directory)
-        
-        # Create Server Button
         btn_create = QPushButton("Create New Server")
         btn_create.clicked.connect(self.create_new_server)
         
@@ -150,7 +195,6 @@ class ServerManager(QMainWindow):
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         console_layout.addWidget(self.console_output)
-        
         self.command_input = QLineEdit()
         self.command_input.returnPressed.connect(self.send_command)
         console_layout.addWidget(self.command_input)
@@ -170,23 +214,34 @@ class ServerManager(QMainWindow):
         # Mods Tab
         self.mods_tab = QWidget()
         mods_layout = QVBoxLayout(self.mods_tab)
+        search_layout = QHBoxLayout()
         self.mod_search = QLineEdit()
         self.mod_search.setPlaceholderText("Search Modrinth...")
-        self.mod_list = QListWidget()
-        mods_layout.addWidget(QLabel("Search Mods:"))
-        mods_layout.addWidget(self.mod_search)
-        mods_layout.addWidget(self.mod_list)
+        btn_search = QPushButton("Search")
+        btn_search.clicked.connect(self.start_mod_search)
+        search_layout.addWidget(self.mod_search)
+        search_layout.addWidget(btn_search)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.mod_list = QWidget()
+        self.mod_list_layout = QVBoxLayout(self.mod_list)
+        scroll.setWidget(self.mod_list)
+        
+        mods_layout.addLayout(search_layout)
+        mods_layout.addWidget(scroll)
         self.tabs.addTab(self.mods_tab, "Mods")
 
         main_layout.addWidget(content_panel, stretch=3)
         self.update_controls()
 
+    # ========================
+    # CORE FUNCTIONALITY
+    # ========================
+
     def select_server_directory(self):
         path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Server Directory",
-            QDir.homePath(),
-            QFileDialog.ShowDirsOnly
+            self, "Select Server Directory", QDir.homePath(), QFileDialog.ShowDirsOnly
         )
         if path:
             self.server_path.setText(path)
@@ -197,11 +252,7 @@ class ServerManager(QMainWindow):
             return
 
         server_name, ok = QInputDialog.getText(
-            self, 
-            "New Server", 
-            "Server name:",
-            QLineEdit.Normal,
-            ""
+            self, "New Server", "Server name:", QLineEdit.Normal, ""
         )
         if ok and server_name:
             self.setup_server(server_name)
@@ -222,11 +273,9 @@ class ServerManager(QMainWindow):
             if jar_url:
                 self.download_file(jar_url, os.path.join(server_dir, "server.jar"))
                 
-                # Create essential files
                 with open(os.path.join(server_dir, "eula.txt"), 'w') as f:
                     f.write("eula=true\n")
                 
-                # Initialize server properties
                 self.create_server_properties(server_dir)
                 
                 self.servers[name] = {
@@ -240,6 +289,111 @@ class ServerManager(QMainWindow):
                 QMessageBox.information(self, "Success", f"Server '{name}' created successfully!")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create server: {str(e)}")
+
+    # ========================
+    # MOD MANAGEMENT
+    # ========================
+
+    def start_mod_search(self):
+        query = self.mod_search.text()
+        if not query:
+            return
+        
+        self.progress.show()
+        self.mod_list_layout.setParent(None)
+        self.mod_list_layout = QVBoxLayout(self.mod_list)
+        self.mod_list.setLayout(self.mod_list_layout)
+        
+        self.search_thread = ModSearchThread(query)
+        self.search_thread.finished.connect(self.show_mod_results)
+        self.search_thread.error.connect(self.show_mod_error)
+        self.search_thread.start()
+
+    def show_mod_results(self, mods):
+        self.progress.hide()
+        self.current_mods = mods
+        
+        for mod in mods:
+            mod_widget = QWidget()
+            mod_widget.setFixedHeight(100)
+            layout = QHBoxLayout(mod_widget)
+            
+            icon_label = QLabel()
+            icon_label.setFixedSize(80, 80)
+            layout.addWidget(icon_label)
+            
+            text_layout = QVBoxLayout()
+            title = QLabel(f"<b>{mod['title']}</b>")
+            title.setStyleSheet("font-size: 14px;")
+            description = QLabel(mod['description'])
+            description.setWordWrap(True)
+            text_layout.addWidget(title)
+            text_layout.addWidget(description)
+            
+            install_btn = QPushButton("Install")
+            install_btn.clicked.connect(lambda _, m=mod: self.install_mod(m))
+            
+            layout.addLayout(text_layout, 1)
+            layout.addWidget(install_btn)
+            self.mod_list_layout.addWidget(mod_widget)
+            
+            self.load_mod_icon(mod['project_id'], mod['icon_url'])
+            
+        self.mod_list_layout.addStretch()
+
+    def load_mod_icon(self, mod_id, icon_url):
+        if mod_id in self.mod_icons:
+            return
+        
+        thread = ImageLoaderThread(icon_url, mod_id)
+        thread.loaded.connect(self.set_mod_icon)
+        thread.start()
+
+    def set_mod_icon(self, mod_id, pixmap):
+        self.mod_icons[mod_id] = pixmap
+        for i in range(self.mod_list_layout.count()):
+            widget = self.mod_list_layout.itemAt(i).widget()
+            if widget and widget.property('mod_id') == mod_id:
+                icon_label = widget.layout().itemAt(0).widget()
+                icon_label.setPixmap(pixmap.scaled(80, 80, Qt.KeepAspectRatio))
+
+    def show_mod_error(self, error):
+        self.progress.hide()
+        QMessageBox.critical(self, "Search Error", f"Failed to search mods: {error}")
+
+    def install_mod(self, mod):
+        if not self.current_server:
+            QMessageBox.warning(self, "Error", "Please select a server first!")
+            return
+            
+        server_path = self.servers[self.current_server]['path']
+        mods_dir = os.path.join(server_path, "mods")
+        os.makedirs(mods_dir, exist_ok=True)
+        
+        try:
+            versions = requests.get(
+                f"https://api.modrinth.com/v2/project/{mod['project_id']}/version"
+            ).json()
+            
+            if not versions:
+                raise Exception("No versions available")
+                
+            version = next((v for v in versions if v['game_versions']), versions[0])
+            file = version['files'][0]
+            
+            mod_path = os.path.join(mods_dir, file['filename'])
+            self.download_file(file['url'], mod_path)
+            
+            QMessageBox.information(self, "Success", 
+                f"Installed {mod['title']} successfully!\nRestart server to apply changes.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Install Error", 
+                f"Failed to install mod: {str(e)}")
+
+    # ========================
+    # UTILITY METHODS
+    # ========================
 
     def get_vanilla_url(self, version):
         manifest = requests.get("https://piston-meta.mojang.com/mc/game/version_manifest.json").json()
