@@ -232,7 +232,8 @@ class ServerManager(QMainWindow):
                 self.servers[name] = {
                     "path": server_dir,
                     "status": "stopped",
-                    "max_ram": "2G"
+                    "max_ram": "2G",
+                    "thread": None
                 }
                 self.save_profiles()
                 self.update_server_list()
@@ -355,15 +356,24 @@ class ServerManager(QMainWindow):
         try:
             if os.path.exists(self.profiles_file):
                 with open(self.profiles_file, 'r') as f:
-                    self.servers = json.load(f)
+                    loaded_servers = json.load(f)
+                    # Add thread placeholder to loaded servers
+                    self.servers = {name: {**data, 'thread': None} 
+                                   for name, data in loaded_servers.items()}
                     self.update_server_list()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load profiles: {str(e)}")
 
     def save_profiles(self):
         try:
+            # Create a serializable copy without the thread object
+            save_data = {
+                name: {k: v for k, v in data.items() if k != 'thread'} 
+                for name, data in self.servers.items()
+            }
+            
             with open(self.profiles_file, 'w') as f:
-                json.dump(self.servers, f, indent=2)
+                json.dump(save_data, f, indent=2)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save profiles: {str(e)}")
 
@@ -433,6 +443,7 @@ class ServerManager(QMainWindow):
     def handle_server_stop(self):
         if self.current_server:
             self.servers[self.current_server]['status'] = 'stopped'
+            self.servers[self.current_server]['thread'] = None
             self.save_profiles()
             self.update_server_list()
             self.update_controls()
