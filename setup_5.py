@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import re
 import os
 import platform
 import json
@@ -200,6 +201,125 @@ class ImageLoaderThread(QThread):
         painter.end()
         self.loaded.emit(self.item_id, pixmap)
 
+class UrlInstallThread(QThread):
+    progress = Signal(int, str)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, urls, server_path, api_keys, target_folder):
+        super().__init__()
+        self.urls = urls
+        self.server_path = server_path
+        self.api_keys = api_keys
+        self.target_folder = target_folder
+
+    def run(self):
+        try:
+            total = len(self.urls)
+            for index, url in enumerate(self.urls):
+                self.progress.emit(int((index/total)*100), f"Processing {url}")
+                file_path = self.process_url(url.strip())
+                if file_path:
+                    self.progress.emit(int(((index+1)/total)*100), f"Installed {os.path.basename(file_path)}")
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def process_url(self, url):
+        # Direct file URL
+        if url.endswith(('.jar', '.zip')):
+            return self.direct_download(url)
+
+        # Modrinth mod
+        if 'modrinth.com' in url:
+            return self.handle_modrinth(url)
+
+        # CurseForge mod/plugin
+        if 'curseforge.com' in url:
+            return self.handle_curseforge(url)
+
+        raise ValueError("Unsupported URL type")
+
+    def direct_download(self, url):
+        save_path = os.path.join(self.server_path, self.target_folder, os.path.basename(url.split('?')[0]))
+        return self.download_file(url, save_path)
+
+    def get_save_path(self, url):
+        filename = os.path.basename(url.split('?')[0])
+        if 'plugin' in filename.lower():
+            folder = 'plugins'
+        else:
+            folder = 'mods'
+        save_dir = os.path.join(self.server_path, folder)
+        os.makedirs(save_dir, exist_ok=True)
+        return os.path.join(save_dir, filename)
+
+    def handle_modrinth(self, url):
+        match = re.search(r'modrinth\.com/(\w+)/([\w-]+)', url)
+        if not match:
+            raise ValueError("Invalid Modrinth URL")
+        
+        project_type = match.group(1)
+        project_id = match.group(2)
+        
+        headers = {}
+        if self.api_keys.get('modrinth'):
+            headers['Authorization'] = self.api_keys['modrinth']
+        
+        # Get latest version
+        response = requests.get(
+            f'https://api.modrinth.com/v2/project/{project_id}/version',
+            headers=headers
+        )
+        versions = response.json()
+        if not versions:
+            raise ValueError("No versions available")
+        
+        # Get server version from installation
+        server_version = self.get_server_version()
+        
+        # Find compatible version
+        for version in versions:
+            if server_version in version['game_versions']:
+                file = version['files'][0]
+                return self.download_file(file['url'], self.get_save_path(file['filename']))
+        
+        raise ValueError(f"No version compatible with {server_version}")
+
+    def handle_curseforge(self, url):
+        match = re.search(r'curseforge\.com/.+?/(\d+)-', url)
+        if not match:
+            raise ValueError("Invalid CurseForge URL")
+        file_id = match.group(1)
+
+        headers = {'x-api-key': self.api_keys['curseforge']}
+        response = requests.get(
+            f'https://api.curseforge.com/v1/mods/files/{file_id}',
+            headers=headers
+        )
+        file_data = response.json()['data']
+        download_url = file_data['downloadUrl']
+        
+        return self.download_file(download_url, self.get_save_path(file_data['fileName']))
+
+    def download_file(self, url, path):
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        with open(path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return path
+
+    def get_server_version(self):
+        # Extract server version from server.properties
+        props_path = os.path.join(self.server_path, 'server.properties')
+        if os.path.exists(props_path):
+            with open(props_path, 'r') as f:
+                for line in f:
+                    if line.startswith('level-type='):
+                        return line.split('=')[1].strip()
+        return None
+
 class ServerManager(QMainWindow):
     """Main application window"""
     def __init__(self):
@@ -324,7 +444,8 @@ class ServerManager(QMainWindow):
         # Mods tab
         mods_tab = QWidget()
         mods_layout = QVBoxLayout(mods_tab)
-        
+        mods_layout.insertLayout(0, self.create_url_section("mods"))
+
         # Mods platform selection
         mods_platform_layout = QHBoxLayout()
         self.mods_platform_combo = QComboBox()
@@ -355,7 +476,8 @@ class ServerManager(QMainWindow):
         # Plugins tab
         plugins_tab = QWidget()
         plugins_layout = QVBoxLayout(plugins_tab)
-        
+        plugins_layout.insertLayout(0, self.create_url_section("plugins"))
+
         # Plugins platform selection
         plugins_platform_layout = QHBoxLayout()
         self.plugins_platform_combo = QComboBox()
@@ -399,6 +521,93 @@ class ServerManager(QMainWindow):
 
         main_layout.addWidget(content_panel, stretch=3)
         self.update_controls()
+
+    def create_url_section(self, target_type):
+        url_layout = QVBoxLayout()
+        url_layout.setContentsMargins(0, 5, 0, 5)  # Reduced vertical margins
+        url_layout.setSpacing(5)  # Reduced spacing between widgets
+
+        lbl = QLabel(f"Install {target_type.capitalize()} from URLs:")
+        lbl.setStyleSheet("font-weight: bold; margin-bottom: 2px;")
+        url_layout.addWidget(lbl)
+
+        url_input = QTextEdit()
+        url_input.setPlaceholderText(f"Paste {target_type} URLs (one per line)...")
+        url_input.setMaximumHeight(60)  # Reduced from 100
+        url_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        url_layout.addWidget(url_input)
+
+        progress = QProgressBar()
+        progress.setFixedHeight(20)  # Compact progress bar
+        progress.hide()
+        url_layout.addWidget(progress)
+
+        status = QLabel()
+        status.setFixedHeight(18)  # Compact status label
+        status.hide()
+        url_layout.addWidget(status)
+
+        btn_install = QPushButton(f"Install {target_type.capitalize()}")
+        btn_install.setFixedHeight(30)  # Compact button
+        btn_install.clicked.connect(lambda: self.start_url_install(target_type))
+        url_layout.addWidget(btn_install)
+
+        # Store references
+        setattr(self, f"{target_type}_url_input", url_input)
+        setattr(self, f"{target_type}_progress", progress)
+        setattr(self, f"{target_type}_status", status)
+    
+        return url_layout
+
+    def start_url_install(self, target_type):
+        if not self.current_server:
+            QMessageBox.warning(self, "Error", "Select a server first!")
+            return
+            
+        urls = getattr(self, f"{target_type}_url_input").toPlainText().split('\n')
+        if not urls:
+            QMessageBox.warning(self, "Error", "Enter at least one URL!")
+            return
+            
+        server_path = self.servers[self.current_server]['path']
+        progress_bar = getattr(self, f"{target_type}_progress")
+        status_label = getattr(self, f"{target_type}_status")
+        
+        self.url_thread = UrlInstallThread(
+            urls,
+            server_path,
+            self.api_keys,
+            target_type
+        )
+        self.url_thread.progress.connect(
+            lambda v, m: self.update_url_progress(v, m, target_type)
+        )
+        self.url_thread.finished.connect(
+            lambda: self.url_install_finished(target_type)
+        )
+        self.url_thread.error.connect(
+            lambda m: self.url_install_error(m, target_type)
+        )
+        self.url_thread.start()
+        
+        progress_bar.show()
+        status_label.show()
+        progress_bar.setValue(0)
+        status_label.setText("Starting installation...")
+
+    def update_url_progress(self, value, message, target_type):
+        getattr(self, f"{target_type}_progress").setValue(value)
+        getattr(self, f"{target_type}_status").setText(message)
+
+    def url_install_finished(self, target_type):
+        getattr(self, f"{target_type}_progress").hide()
+        getattr(self, f"{target_type}_status").hide()
+        QMessageBox.information(self, "Success", f"{target_type.capitalize()} installed successfully!")
+
+    def url_install_error(self, message, target_type):
+        getattr(self, f"{target_type}_progress").hide()
+        getattr(self, f"{target_type}_status").hide()
+        QMessageBox.critical(self, "Error", message)
 
     def check_api_keys(self):
         """Check and load API keys"""
