@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# minecraft_server_manager.py
 import sys
 import os
 import platform
@@ -103,16 +102,23 @@ class ModSearchThread(QThread):
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, query, mc_version=None, api_key=None):
+    def __init__(self, query, mc_version=None, api_key=None, content_type="mods"):
         super().__init__()
         self.query = query
         self.mc_version = mc_version
         self.api_key = api_key
+        self.content_type = content_type
 
     def run(self):
-        """Execute mod search"""
+        """Execute search"""
         try:
-            facets = [["categories:forge"]]
+            facets = []
+            if self.content_type == "mods":
+                facets.append(["categories:forge"])
+            elif self.content_type == "plugins":
+                facets.append(["categories:bukkit"])
+            
+            # Add Minecraft version filter if available
             if self.mc_version:
                 facets.append([f"versions:{self.mc_version}"])
             
@@ -131,14 +137,45 @@ class ModSearchThread(QThread):
             self.error.emit(str(e))
             logger.error(f"Mod search error: {str(e)}")
 
+class CurseForgeSearchThread(QThread):
+    """Thread for searching CurseForge"""
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, query, class_id, api_key):
+        super().__init__()
+        self.query = query
+        self.class_id = class_id
+        self.api_key = api_key
+
+    def run(self):
+        """Execute search"""
+        try:
+            headers = {'x-api-key': self.api_key}
+            response = requests.post(
+                'https://api.curseforge.com/v1/mods/search',
+                headers=headers,
+                json={
+                    'gameId': 432,
+                    'searchFilter': self.query,
+                    'classId': self.class_id
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            self.finished.emit(response.json()['data'])
+        except Exception as e:
+            self.error.emit(str(e))
+            logger.error(f"CurseForge search error: {str(e)}")
+
 class ImageLoaderThread(QThread):
-    """Thread for loading mod images"""
+    """Thread for loading images"""
     loaded = Signal(str, QPixmap)
 
-    def __init__(self, url, mod_id):
+    def __init__(self, url, item_id):
         super().__init__()
         self.url = url
-        self.mod_id = mod_id
+        self.item_id = item_id
 
     def run(self):
         """Load image from URL"""
@@ -149,7 +186,7 @@ class ImageLoaderThread(QThread):
                 image.loadFromData(response.content)
                 if not image.isNull():
                     pixmap = QPixmap.fromImage(image)
-                    self.loaded.emit(self.mod_id, pixmap)
+                    self.loaded.emit(self.item_id, pixmap)
                     return
         except Exception as e:
             logger.warning(f"Image load failed: {str(e)}")
@@ -161,7 +198,7 @@ class ImageLoaderThread(QThread):
         painter.setPen(Qt.white)
         painter.drawText(pixmap.rect(), Qt.AlignCenter, "No Image")
         painter.end()
-        self.loaded.emit(self.mod_id, pixmap)
+        self.loaded.emit(self.item_id, pixmap)
 
 class ServerManager(QMainWindow):
     """Main application window"""
@@ -288,42 +325,62 @@ class ServerManager(QMainWindow):
         mods_tab = QWidget()
         mods_layout = QVBoxLayout(mods_tab)
         
-        search_layout = QHBoxLayout()
-        self.mod_search = QLineEdit()
-        self.mod_search.setPlaceholderText("Search Modrinth...")
-        btn_search = QPushButton("Search")
-        btn_search.clicked.connect(self.safe_mod_search)
-        search_layout.addWidget(self.mod_search)
-        search_layout.addWidget(btn_search)
-        mods_layout.addLayout(search_layout)
+        # Mods platform selection
+        mods_platform_layout = QHBoxLayout()
+        self.mods_platform_combo = QComboBox()
+        self.mods_platform_combo.addItems(["Modrinth", "CurseForge"])
+        mods_platform_layout.addWidget(QLabel("Source:"))
+        mods_platform_layout.addWidget(self.mods_platform_combo)
+        mods_layout.addLayout(mods_platform_layout)
         
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        # Mods search
+        mods_search_layout = QHBoxLayout()
+        self.mod_search = QLineEdit()
+        self.mod_search.setPlaceholderText("Search mods...")
+        btn_mod_search = QPushButton("Search")
+        btn_mod_search.clicked.connect(self.safe_mod_search)
+        mods_search_layout.addWidget(self.mod_search)
+        mods_search_layout.addWidget(btn_mod_search)
+        mods_layout.addLayout(mods_search_layout)
+        
+        # Mods list
+        mods_scroll = QScrollArea()
+        mods_scroll.setWidgetResizable(True)
         self.mod_list_container = QWidget()
         self.mod_list_layout = QVBoxLayout(self.mod_list_container)
-        scroll.setWidget(self.mod_list_container)
-        mods_layout.addWidget(scroll)
+        mods_scroll.setWidget(self.mod_list_container)
+        mods_layout.addWidget(mods_scroll)
         self.tabs.addTab(mods_tab, "Mods")
 
         # Plugins tab
         plugins_tab = QWidget()
         plugins_layout = QVBoxLayout(plugins_tab)
         
-        search_layout = QHBoxLayout()
-        self.plugin_search = QLineEdit()
-        self.plugin_search.setPlaceholderText("Search CurseForge...")
-        btn_search = QPushButton("Search")
-        btn_search.clicked.connect(self.safe_plugin_search)
-        search_layout.addWidget(self.plugin_search)
-        search_layout.addWidget(btn_search)
-        plugins_layout.addLayout(search_layout)
+        # Plugins platform selection
+        plugins_platform_layout = QHBoxLayout()
+        self.plugins_platform_combo = QComboBox()
+        self.plugins_platform_combo.addItems(["CurseForge", "Modrinth"])
+        plugins_platform_layout.addWidget(QLabel("Source:"))
+        plugins_platform_layout.addWidget(self.plugins_platform_combo)
+        plugins_layout.addLayout(plugins_platform_layout)
         
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        # Plugins search
+        plugins_search_layout = QHBoxLayout()
+        self.plugin_search = QLineEdit()
+        self.plugin_search.setPlaceholderText("Search plugins...")
+        btn_plugin_search = QPushButton("Search")
+        btn_plugin_search.clicked.connect(self.safe_plugin_search)
+        plugins_search_layout.addWidget(self.plugin_search)
+        plugins_search_layout.addWidget(btn_plugin_search)
+        plugins_layout.addLayout(plugins_search_layout)
+        
+        # Plugins list
+        plugins_scroll = QScrollArea()
+        plugins_scroll.setWidgetResizable(True)
         self.plugin_list_container = QWidget()
         self.plugin_list_layout = QVBoxLayout(self.plugin_list_container)
-        scroll.setWidget(self.plugin_list_container)
-        plugins_layout.addWidget(scroll)
+        plugins_scroll.setWidget(self.plugin_list_container)
+        plugins_layout.addWidget(plugins_scroll)
         self.tabs.addTab(plugins_tab, "Plugins")
 
         # Settings tab
@@ -768,59 +825,177 @@ class ServerManager(QMainWindow):
                 logger.error(f"Server deletion error: {str(e)}")
 
     def safe_mod_search(self):
-        """Search Modrinth for mods"""
-        if not self.api_keys.get('modrinth'):
-            QMessageBox.warning(self, "Error", "Modrinth API key required!")
-            self.show_api_key_dialog()
+        """Search for mods from selected platform"""
+        platform = self.mods_platform_combo.currentText()
+        query = self.mod_search.text()
+        
+        if not query:
             return
             
-        for loader in self.current_image_loaders:
-            if loader.isRunning():
-                loader.quit()
-        self.current_image_loaders.clear()
+        self.progress.show()
         
+        try:
+            if platform == "Modrinth":
+                if not self.api_keys.get('modrinth'):
+                    QMessageBox.warning(self, "Error", "Modrinth API key required!")
+                    self.show_api_key_dialog()
+                    return
+                
+                server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
+                self.search_thread = ModSearchThread(
+                    query, 
+                    mc_version=server_version,
+                    api_key=self.api_keys['modrinth'],
+                    content_type="mods"
+                )
+                self.search_thread.finished.connect(self.show_mods)
+                self.search_thread.error.connect(self.show_search_error)
+                self.search_thread.start()
+                
+            elif platform == "CurseForge":
+                if not self.api_keys.get('curseforge'):
+                    QMessageBox.warning(self, "Error", "CurseForge API key required!")
+                    self.show_api_key_dialog()
+                    return
+                
+                self.search_thread = CurseForgeSearchThread(
+                    query,
+                    class_id=6,  # 6 = Mods in CurseForge
+                    api_key=self.api_keys['curseforge']
+                )
+                self.search_thread.finished.connect(lambda data: self.show_mods(self._format_cf_mods(data)))
+                self.search_thread.error.connect(self.show_search_error)
+                self.search_thread.start()
+                
+        except Exception as e:
+            self.progress.hide()
+            QMessageBox.critical(self, "Error", f"Search failed: {str(e)}")
+
+    def safe_plugin_search(self):
+        """Search for plugins from selected platform"""
+        platform = self.plugins_platform_combo.currentText()
+        query = self.plugin_search.text()
+        
+        if not query:
+            return
+            
+        self.progress.show()
+        
+        try:
+            if platform == "CurseForge":
+                if not self.api_keys.get('curseforge'):
+                    QMessageBox.warning(self, "Error", "CurseForge API key required!")
+                    self.show_api_key_dialog()
+                    return
+                
+                self.search_thread = CurseForgeSearchThread(
+                    query,
+                    class_id=5,  # 5 = Plugins in CurseForge
+                    api_key=self.api_keys['curseforge']
+                )
+                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_cf_plugins(data)))
+                self.search_thread.error.connect(self.show_search_error)
+                self.search_thread.start()
+                
+            elif platform == "Modrinth":
+                if not self.api_keys.get('modrinth'):
+                    QMessageBox.warning(self, "Error", "Modrinth API key required!")
+                    self.show_api_key_dialog()
+                    return
+                
+                server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
+                self.search_thread = ModSearchThread(
+                    query, 
+                    mc_version=server_version,
+                    api_key=self.api_keys['modrinth'],
+                    content_type="plugins"
+                )
+                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_modrinth_plugins(data)))
+                self.search_thread.error.connect(self.show_search_error)
+                self.search_thread.start()
+                
+        except Exception as e:
+            self.progress.hide()
+            QMessageBox.critical(self, "Error", f"Search failed: {str(e)}")
+
+    def _format_cf_mods(self, cf_mods):
+        """Format CurseForge mods for display"""
+        return [{
+            'id': mod['id'],
+            'title': mod['name'],
+            'description': mod.get('summary', 'No description'),
+            'icon_url': mod['logo']['url'] if mod.get('logo') else None,
+            'versions': mod['latestFiles']
+        } for mod in cf_mods]
+
+    def _format_modrinth_plugins(self, modrinth_plugins):
+        """Format Modrinth plugins for display"""
+        return [{
+            'id': plugin['project_id'],
+            'name': plugin['title'],
+            'description': plugin.get('description', 'No description'),
+            'icon_url': plugin.get('icon_url'),
+            'versions': plugin['versions']
+        } for plugin in modrinth_plugins]
+
+    def _format_cf_plugins(self, cf_plugins):
+        """Format CurseForge plugins for display"""
+        return [{
+            'id': plugin['id'],
+            'name': plugin['name'],
+            'description': plugin.get('summary', 'No description'),
+            'icon_url': plugin['logo']['url'] if plugin.get('logo') else None,
+            'versions': plugin['latestFiles']
+        } for plugin in cf_plugins]
+
+    def show_mods(self, mods):
+        """Display mods in the mods tab"""
+        self.progress.hide()
         while self.mod_list_layout.count():
             item = self.mod_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         
-        query = self.mod_search.text()
-        if query:
-            self.progress.show()
-            server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
-            self.search_thread = ModSearchThread(query, server_version, self.api_keys['modrinth'])
-            self.search_thread.finished.connect(self.show_mods)
-            self.search_thread.error.connect(self.show_mod_error)
-            self.search_thread.start()
-
-    def show_mods(self, mods):
-        """Display mod search results"""
-        self.progress.hide()
         try:
             for mod in mods:
                 self.create_mod_card(mod)
             self.mod_list_layout.addStretch()
-            logger.info(f"Displayed {len(mods)} mods")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to display mods: {str(e)}")
-            logger.error(f"Mod display error: {str(e)}")
+
+    def show_plugins(self, plugins):
+        """Display plugins in the plugins tab"""
+        self.progress.hide()
+        while self.plugin_list_layout.count():
+            item = self.plugin_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        try:
+            for plugin in plugins:
+                self.create_plugin_card(plugin)
+            self.plugin_list_layout.addStretch()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to display plugins: {str(e)}")
 
     def create_mod_card(self, mod):
-        """Create mod UI card"""
+        """Create a mod card UI element"""
         widget = QWidget()
-        widget.setProperty("mod_id", mod['project_id'])
+        widget.setProperty("mod_id", mod['id'])
         widget.setFixedHeight(100)
         
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
         
+        # Icon
         icon_label = QLabel()
         icon_label.setFixedSize(80, 80)
         icon_label.setStyleSheet("background-color: #353535;")
         layout.addWidget(icon_label)
         
+        # Text info
         text_layout = QVBoxLayout()
-        title = QLabel(f"<b>{mod['title']}</b>")
+        title = QLabel(f"<b>{mod.get('title', mod.get('name'))}</b>")
         title.setStyleSheet("color: white; font-size: 14px;")
         desc = QLabel(mod.get('description', 'No description'))
         desc.setStyleSheet("color: #AAAAAA;")
@@ -828,6 +1003,7 @@ class ServerManager(QMainWindow):
         text_layout.addWidget(title)
         text_layout.addWidget(desc)
         
+        # Install button
         install_btn = QPushButton("Install")
         install_btn.setStyleSheet("""
             QPushButton {
@@ -845,119 +1021,125 @@ class ServerManager(QMainWindow):
         layout.addWidget(install_btn)
         self.mod_list_layout.addWidget(widget)
         
+        # Load icon
         if mod.get('icon_url'):
-            self.load_mod_icon(mod['project_id'], mod['icon_url'])
-        else:
-            self.set_fallback_icon(mod['project_id'])
+            self.load_item_icon(mod['id'], mod['icon_url'], icon_label)
 
-    def load_mod_icon(self, mod_id, url):
-        """Load mod icon"""
-        loader = ImageLoaderThread(url, mod_id)
-        loader.loaded.connect(self.update_mod_icon)
+    def create_plugin_card(self, plugin):
+        """Create a plugin card UI element"""
+        widget = QWidget()
+        widget.setProperty("plugin_id", plugin['id'])
+        widget.setFixedHeight(100)
+        
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Icon
+        icon_label = QLabel()
+        icon_label.setFixedSize(80, 80)
+        icon_label.setStyleSheet("background-color: #353535;")
+        layout.addWidget(icon_label)
+        
+        # Text info
+        text_layout = QVBoxLayout()
+        title = QLabel(f"<b>{plugin.get('name')}</b>")
+        title.setStyleSheet("color: white; font-size: 14px;")
+        desc = QLabel(plugin.get('description', 'No description'))
+        desc.setStyleSheet("color: #AAAAAA;")
+        desc.setWordWrap(True)
+        text_layout.addWidget(title)
+        text_layout.addWidget(desc)
+        
+        # Install button
+        install_btn = QPushButton("Install")
+        install_btn.setStyleSheet("""
+            QPushButton {
+                background: #505050;
+                color: white;
+                border: none;
+                padding: 5px;
+                min-width: 80px;
+            }
+            QPushButton:hover { background: #606060; }
+        """)
+        install_btn.clicked.connect(lambda _, p=plugin: self.install_plugin(p))
+        
+        layout.addLayout(text_layout)
+        layout.addWidget(install_btn)
+        self.plugin_list_layout.addWidget(widget)
+        
+        # Load icon
+        if plugin.get('icon_url'):
+            self.load_item_icon(plugin['id'], plugin['icon_url'], icon_label)
+
+    def load_item_icon(self, item_id, url, target_label):
+        """Load and display item icon"""
+        loader = ImageLoaderThread(url, item_id)
+        loader.loaded.connect(lambda item_id, pixmap: self.update_item_icon(item_id, pixmap, target_label))
         self.current_image_loaders.append(loader)
         loader.start()
 
-    def update_mod_icon(self, mod_id, pixmap):
-        """Update mod icon display"""
-        for i in range(self.mod_list_layout.count()):
-            widget = self.mod_list_layout.itemAt(i).widget()
-            if widget and widget.property("mod_id") == mod_id:
-                icon_label = widget.layout().itemAt(0).widget()
-                icon_label.setPixmap(pixmap.scaled(
-                    80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                ))
-                break
-
-    def set_fallback_icon(self, mod_id):
-        """Set fallback icon"""
-        pixmap = QPixmap(80, 80)
-        pixmap.fill(QColor(53, 53, 53))
-        painter = QPainter(pixmap)
-        painter.setPen(Qt.white)
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "No Image")
-        painter.end()
-        self.update_mod_icon(mod_id, pixmap)
+    def update_item_icon(self, item_id, pixmap, target_label):
+        """Update the icon for a specific item"""
+        target_label.setPixmap(pixmap.scaled(
+            80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
 
     def install_mod(self, mod):
         """Install selected mod"""
-        if not self.api_keys.get('modrinth'):
-            QMessageBox.warning(self, "Error", "Modrinth API key required!")
-            self.show_api_key_dialog()
-            return
-            
+        platform = self.mods_platform_combo.currentText()
         if not self.current_server:
             QMessageBox.warning(self, "Error", "Select a server first!")
             return
-            
-        try:
-            server = self.servers[self.current_server]
-            mc_version = server.get('mc_version', 'unknown')
-            
-            versions = requests.get(
-                f"https://api.modrinth.com/v2/project/{mod['project_id']}/version",
-                headers={'Authorization': self.api_keys['modrinth']},
-                timeout=10
-            ).json()
-            
-            compatible_versions = [v for v in versions if mc_version in v.get('game_versions', [])]
-            if not compatible_versions:
-                QMessageBox.warning(self, "Error", 
-                    f"No versions compatible with {mc_version} found!")
-                return
-                
-            version = compatible_versions[0]
-            file = version['files'][0]
-            
-            server_path = server['path']
-            mods_dir = os.path.join(server_path, "mods")
-            os.makedirs(mods_dir, exist_ok=True)
-            
-            self.download_file(file['url'], os.path.join(mods_dir, file['filename']))
-            QMessageBox.information(self, "Success", f"Installed {mod['title']}!")
-            logger.info(f"Installed mod: {mod['title']}")
 
+        server_path = self.servers[self.current_server]['path']
+        mods_dir = os.path.join(server_path, "mods")
+        os.makedirs(mods_dir, exist_ok=True)
+
+        try:
+            if platform == "Modrinth":
+                version = mod['versions'][0]
+                file = version['files'][0]
+                url = file['url']
+                filename = file['filename']
+            elif platform == "CurseForge":
+                file = mod['versions'][0]
+                url = file['downloadUrl']
+                filename = file['fileName']
+            
+            self.download_file(url, os.path.join(mods_dir, filename))
+            QMessageBox.information(self, "Success", f"Installed {mod.get('title', mod.get('name'))}!")
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Install failed: {str(e)}")
-            logger.error(f"Mod installation error: {str(e)}")
 
-    def show_mod_error(self, error):
-        """Handle mod search errors"""
-        self.progress.hide()
-        QMessageBox.critical(self, "Search Error", f"Mod search failed: {error}")
-        logger.error(f"Mod search error: {error}")
+    def install_plugin(self, plugin):
+        """Install selected plugin"""
+        platform = self.plugins_platform_combo.currentText()
+        if not self.current_server:
+            QMessageBox.warning(self, "Error", "Select a server first!")
+            return
 
-    def safe_plugin_search(self):
-        """Search CurseForge for plugins"""
-        if not self.api_keys.get('curseforge'):
-            QMessageBox.warning(self, "Error", "CurseForge API key required!")
-            self.show_api_key_dialog()
-            return
-            
-        query = self.plugin_search.text()
-        if not query:
-            return
-            
-        self.progress.show()
+        server_path = self.servers[self.current_server]['path']
+        plugins_dir = os.path.join(server_path, "plugins")
+        os.makedirs(plugins_dir, exist_ok=True)
+
         try:
-            headers = {'x-api-key': self.api_keys['curseforge']}
-            response = requests.post(
-                'https://api.curseforge.com/v1/mods/search',
-                headers=headers,
-                json={
-                    'gameId': 432,
-                    'searchFilter': query,
-                    'classId': 5
-                },
-                timeout=10
-            )
-            response.raise_for_status()
-            self.show_plugins(response.json()['data'])
-            logger.info(f"Plugin search completed: {query}")
+            if platform == "Modrinth":
+                version = plugin['versions'][0]
+                file = version['files'][0]
+                url = file['url']
+                filename = file['filename']
+            elif platform == "CurseForge":
+                file = plugin['versions'][0]
+                url = file['downloadUrl']
+                filename = file['fileName']
+            
+            self.download_file(url, os.path.join(plugins_dir, filename))
+            QMessageBox.information(self, "Success", f"Installed {plugin['name']}!")
+            
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Plugin search failed: {str(e)}")
-            logger.error(f"Plugin search error: {str(e)}")
-        finally:
-            self.progress.hide()
+            QMessageBox.critical(self, "Error", f"Install failed: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
