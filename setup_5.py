@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# minecraft_server_manager.py
 import sys
 import os
 import platform
@@ -13,13 +14,13 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QLabel, QTabWidget, QTextEdit,
     QLineEdit, QFileDialog, QMessageBox, QTreeView, QFileSystemModel,
     QInputDialog, QListWidget, QListWidgetItem, QProgressBar,
-    QScrollArea, QSizePolicy, QFormLayout
+    QScrollArea, QSizePolicy, QFormLayout, QDialog, QDialogButtonBox
 )
 from PySide6.QtGui import QIcon, QAction, QPixmap, QImage, QPainter, QColor
 from PySide6.QtCore import Qt, QThread, Signal, QDir, QTimer, QSize, QStandardPaths
 import qdarktheme
 
-# Initialize logging
+# Logging configuration
 logging.basicConfig(
     filename='server_manager.log',
     level=logging.INFO,
@@ -28,7 +29,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class ApiKeyDialog(QDialog):
+    """Dialog for API key configuration"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("API Key Configuration")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        
+        self.curseforge_key = QLineEdit()
+        self.curseforge_key.setPlaceholderText("Enter CurseForge API key...")
+        self.modrinth_key = QLineEdit()
+        self.modrinth_key.setPlaceholderText("Enter Modrinth API key...")
+        
+        form = QFormLayout()
+        form.addRow("CurseForge API Key:", self.curseforge_key)
+        form.addRow("Modrinth API Key:", self.modrinth_key)
+        layout.addLayout(form)
+        
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            Qt.Horizontal, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
 class ServerThread(QThread):
+    """Thread for managing server process"""
     output = Signal(str)
     stopped = Signal()
 
@@ -40,6 +69,7 @@ class ServerThread(QThread):
         self.running = False
 
     def run(self):
+        """Main execution method"""
         self.running = True
         try:
             self.process = subprocess.Popen(
@@ -63,27 +93,36 @@ class ServerThread(QThread):
             self.stopped.emit()
 
     def stop(self):
+        """Stop the server process"""
         self.running = False
         if self.process:
             self.process.terminate()
 
 class ModSearchThread(QThread):
+    """Thread for searching Modrinth"""
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, query, mc_version=None):
+    def __init__(self, query, mc_version=None, api_key=None):
         super().__init__()
         self.query = query
         self.mc_version = mc_version
+        self.api_key = api_key
 
     def run(self):
+        """Execute mod search"""
         try:
             facets = [["categories:forge"]]
             if self.mc_version:
                 facets.append([f"versions:{self.mc_version}"])
             
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = self.api_key
+                
             response = requests.get(
                 f"https://api.modrinth.com/v2/search?query={self.query}&facets={json.dumps(facets)}",
+                headers=headers,
                 timeout=10
             )
             response.raise_for_status()
@@ -93,6 +132,7 @@ class ModSearchThread(QThread):
             logger.error(f"Mod search error: {str(e)}")
 
 class ImageLoaderThread(QThread):
+    """Thread for loading mod images"""
     loaded = Signal(str, QPixmap)
 
     def __init__(self, url, mod_id):
@@ -101,6 +141,7 @@ class ImageLoaderThread(QThread):
         self.mod_id = mod_id
 
     def run(self):
+        """Load image from URL"""
         try:
             response = requests.get(self.url, timeout=10)
             if response.status_code == 200:
@@ -113,6 +154,7 @@ class ImageLoaderThread(QThread):
         except Exception as e:
             logger.warning(f"Image load failed: {str(e)}")
         
+        # Fallback image
         pixmap = QPixmap(80, 80)
         pixmap.fill(QColor(53, 53, 53))
         painter = QPainter(pixmap)
@@ -122,9 +164,9 @@ class ImageLoaderThread(QThread):
         self.loaded.emit(self.mod_id, pixmap)
 
 class ServerManager(QMainWindow):
+    """Main application window"""
     def __init__(self):
         super().__init__()
-        # Initialize settings first
         self.java_versions = ['8', '11', '17', '21']
         self.loaders = ['Vanilla', 'Paper', 'Spigot', 'Forge', 'Fabric', 'Quilt', 'Mohist']
         self.servers = {}
@@ -132,49 +174,53 @@ class ServerManager(QMainWindow):
         self.profiles_file = "profiles.json"
         self.settings_file = "settings.json"
         self.current_image_loaders = []
-        self.settings = {'curseforge_key': '', 'modrinth_key': ''}
+        self.api_keys = {'curseforge': '', 'modrinth': ''}
 
-        # Set up UI first
+        # Initialize UI
         self.setWindowTitle("Minecraft Server Manager")
         self.setGeometry(100, 100, 1200, 800)
-        self.setup_ui()  # Initialize UI components first
+        self.setup_ui()
         
-        # Then load data
-        self.load_settings()
+        # Load data
         self.load_profiles()
         self.check_java()
+        self.check_api_keys()
+        
         logger.info("Application started")
 
     def setup_ui(self):
+        """Initialize user interface"""
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        # Left Panel - Server List
+        # Left panel - Server list
         server_list_panel = QWidget()
         server_list_layout = QVBoxLayout(server_list_panel)
+        
         self.server_list = QListWidget()
         self.server_list.itemClicked.connect(self.select_server)
         server_list_layout.addWidget(QLabel("Servers:"))
         server_list_layout.addWidget(self.server_list)
         
-        # Server Controls
+        # Server controls
         self.btn_start = QPushButton("Start Server")
         self.btn_start.clicked.connect(self.start_server)
         self.btn_stop = QPushButton("Stop Server")
         self.btn_stop.clicked.connect(self.stop_server)
         self.btn_delete = QPushButton("Delete Server")
         self.btn_delete.clicked.connect(self.delete_server)
+        
         server_list_layout.addWidget(self.btn_start)
         server_list_layout.addWidget(self.btn_stop)
         server_list_layout.addWidget(self.btn_delete)
         main_layout.addWidget(server_list_panel, stretch=1)
 
-        # Right Panel - Main Content
+        # Right panel - Main content
         content_panel = QWidget()
         content_layout = QVBoxLayout(content_panel)
         
-        # Server Creation Controls
+        # Server creation controls
         creation_layout = QHBoxLayout()
         self.server_path = QLineEdit()
         self.server_path.setPlaceholderText("Select server directory...")
@@ -182,6 +228,7 @@ class ServerManager(QMainWindow):
         btn_browse.clicked.connect(self.select_server_directory)
         btn_create = QPushButton("Create Server")
         btn_create.clicked.connect(self.create_new_server)
+        
         creation_layout.addWidget(QLabel("Location:"))
         creation_layout.addWidget(self.server_path)
         creation_layout.addWidget(btn_browse)
@@ -206,7 +253,7 @@ class ServerManager(QMainWindow):
         config_layout.addWidget(self.version_combo)
         content_layout.addLayout(config_layout)
 
-        # Progress Bar
+        # Progress bar
         self.progress = QProgressBar()
         self.progress.hide()
         content_layout.addWidget(self.progress)
@@ -215,7 +262,7 @@ class ServerManager(QMainWindow):
         self.tabs = QTabWidget()
         content_layout.addWidget(self.tabs)
 
-        # Console Tab
+        # Console tab
         console_tab = QWidget()
         console_layout = QVBoxLayout(console_tab)
         self.console_output = QTextEdit()
@@ -226,7 +273,7 @@ class ServerManager(QMainWindow):
         console_layout.addWidget(self.command_input)
         self.tabs.addTab(console_tab, "Console")
 
-        # File Browser Tab
+        # File browser tab
         file_tab = QWidget()
         file_layout = QVBoxLayout(file_tab)
         self.file_model = QFileSystemModel()
@@ -237,9 +284,10 @@ class ServerManager(QMainWindow):
         file_layout.addWidget(self.file_view)
         self.tabs.addTab(file_tab, "Files")
 
-        # Mods Tab
+        # Mods tab
         mods_tab = QWidget()
         mods_layout = QVBoxLayout(mods_tab)
+        
         search_layout = QHBoxLayout()
         self.mod_search = QLineEdit()
         self.mod_search.setPlaceholderText("Search Modrinth...")
@@ -248,6 +296,7 @@ class ServerManager(QMainWindow):
         search_layout.addWidget(self.mod_search)
         search_layout.addWidget(btn_search)
         mods_layout.addLayout(search_layout)
+        
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.mod_list_container = QWidget()
@@ -256,9 +305,10 @@ class ServerManager(QMainWindow):
         mods_layout.addWidget(scroll)
         self.tabs.addTab(mods_tab, "Mods")
 
-        # Plugins Tab
+        # Plugins tab
         plugins_tab = QWidget()
         plugins_layout = QVBoxLayout(plugins_tab)
+        
         search_layout = QHBoxLayout()
         self.plugin_search = QLineEdit()
         self.plugin_search.setPlaceholderText("Search CurseForge...")
@@ -267,6 +317,7 @@ class ServerManager(QMainWindow):
         search_layout.addWidget(self.plugin_search)
         search_layout.addWidget(btn_search)
         plugins_layout.addLayout(search_layout)
+        
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.plugin_list_container = QWidget()
@@ -275,33 +326,83 @@ class ServerManager(QMainWindow):
         plugins_layout.addWidget(scroll)
         self.tabs.addTab(plugins_tab, "Plugins")
 
-        # Settings Tab
+        # Settings tab
         settings_tab = QWidget()
         settings_layout = QFormLayout(settings_tab)
-        self.curseforge_key = QLineEdit()
-        self.curseforge_key.setText(self.settings.get('curseforge_key', ''))
-        settings_layout.addRow("CurseForge API Key:", self.curseforge_key)
-        self.modrinth_key = QLineEdit()
-        self.modrinth_key.setText(self.settings.get('modrinth_key', ''))
-        settings_layout.addRow("Modrinth API Key:", self.modrinth_key)
-        btn_save = QPushButton("Save Settings")
-        btn_save.clicked.connect(self.save_settings)
+        self.curseforge_key_input = QLineEdit()
+        self.curseforge_key_input.setPlaceholderText("Enter CurseForge API key...")
+        settings_layout.addRow("CurseForge API Key:", self.curseforge_key_input)
+        self.modrinth_key_input = QLineEdit()
+        self.modrinth_key_input.setPlaceholderText("Enter Modrinth API key...")
+        settings_layout.addRow("Modrinth API Key:", self.modrinth_key_input)
+        btn_save = QPushButton("Save API Keys")
+        btn_save.clicked.connect(self.save_api_keys)
         settings_layout.addRow(btn_save)
         self.tabs.addTab(settings_tab, "Settings")
 
         main_layout.addWidget(content_panel, stretch=3)
         self.update_controls()
 
+    def check_api_keys(self):
+        """Check and load API keys"""
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    self.api_keys = json.load(f)
+                    self.curseforge_key_input.setText(self.api_keys.get('curseforge', ''))
+                    self.modrinth_key_input.setText(self.api_keys.get('modrinth', ''))
+                    
+            if not self.api_keys.get('curseforge') or not self.api_keys.get('modrinth'):
+                self.show_api_key_dialog()
+                
+        except Exception as e:
+            logger.error(f"API key check failed: {str(e)}")
+            self.show_api_key_dialog()
+
+    def show_api_key_dialog(self):
+        """Show API key configuration dialog"""
+        dialog = ApiKeyDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.api_keys['curseforge'] = dialog.curseforge_key.text()
+            self.api_keys['modrinth'] = dialog.modrinth_key.text()
+            self.curseforge_key_input.setText(self.api_keys['curseforge'])
+            self.modrinth_key_input.setText(self.api_keys['modrinth'])
+            self.save_api_keys()
+        else:
+            QMessageBox.warning(
+                self,
+                "API Keys Required",
+                "You must configure API keys to use all features."
+            )
+            self.show_api_key_dialog()
+
+    def save_api_keys(self):
+        """Save API keys to file"""
+        try:
+            self.api_keys['curseforge'] = self.curseforge_key_input.text()
+            self.api_keys['modrinth'] = self.modrinth_key_input.text()
+            
+            with open(self.settings_file, 'w') as f:
+                json.dump(self.api_keys, f)
+                
+            QMessageBox.information(self, "Success", "API keys saved!")
+            logger.info("API keys updated")
+        except Exception as e:
+            logger.error(f"API key save failed: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to save API keys: {str(e)}")
+
     def closeEvent(self, event):
+        """Handle application shutdown"""
         for loader in self.current_image_loaders:
             if loader.isRunning():
                 loader.quit()
         self.save_profiles()
-        self.save_settings()
+        self.save_api_keys()
         logger.info("Application closed")
         event.accept()
 
     def select_server_directory(self):
+        """Select server directory"""
         path = QFileDialog.getExistingDirectory(
             self, "Select Directory", QDir.homePath(), QFileDialog.ShowDirsOnly
         )
@@ -310,6 +411,7 @@ class ServerManager(QMainWindow):
             logger.info(f"Selected server directory: {path}")
 
     def create_new_server(self):
+        """Create new server instance"""
         if not self.server_path.text():
             QMessageBox.warning(self, "Error", "Select server directory first!")
             return
@@ -319,6 +421,7 @@ class ServerManager(QMainWindow):
             self.setup_server(name)
 
     def setup_server(self, name):
+        """Configure new server"""
         server_dir = os.path.join(self.server_path.text(), name)
         os.makedirs(server_dir, exist_ok=True)
         logger.info(f"Creating server: {name} at {server_dir}")
@@ -366,6 +469,7 @@ class ServerManager(QMainWindow):
                     logger.error(f"Cleanup failed: {str(cleanup_error)}")
 
     def update_versions(self, loader_name):
+        """Update available Minecraft versions"""
         self.version_combo.clear()
         self.progress.show()
         logger.info(f"Fetching versions for {loader_name}")
@@ -395,6 +499,7 @@ class ServerManager(QMainWindow):
             self.progress.hide()
 
     def get_vanilla_url(self, version):
+        """Get Vanilla server download URL"""
         manifest = requests.get("https://piston-meta.mojang.com/mc/game/version_manifest.json", timeout=10).json()
         for v in manifest['versions']:
             if v['id'] == version and v['type'] == "release":
@@ -403,6 +508,7 @@ class ServerManager(QMainWindow):
         raise ValueError("Version not found")
 
     def get_paper_url(self, version):
+        """Get PaperMC server download URL"""
         builds = requests.get(f"https://api.papermc.io/v2/projects/paper/versions/{version}", timeout=10).json()
         if not builds['builds']:
             raise ValueError("No builds found")
@@ -410,6 +516,7 @@ class ServerManager(QMainWindow):
         return f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds/{latest}/downloads/paper-{version}-{latest}.jar"
 
     def download_file(self, url, path):
+        """Download a file from URL"""
         try:
             response = requests.get(url, stream=True, timeout=30)
             response.raise_for_status()
@@ -422,6 +529,7 @@ class ServerManager(QMainWindow):
             raise Exception(f"Download failed: {str(e)}")
 
     def create_server_properties(self, server_dir):
+        """Create server.properties file"""
         try:
             default_props = {
                 "server-port": "25565",
@@ -440,6 +548,7 @@ class ServerManager(QMainWindow):
             raise
 
     def generate_password(self):
+        """Generate secure RCON password"""
         try:
             return subprocess.check_output(
                 ['openssl', 'rand', '-base64', '12'], 
@@ -450,6 +559,7 @@ class ServerManager(QMainWindow):
             return str(os.urandom(12).hex())
 
     def open_file(self, index):
+        """Open selected file"""
         path = self.file_model.filePath(index)
         if os.path.isfile(path):
             try:
@@ -464,6 +574,7 @@ class ServerManager(QMainWindow):
                 logger.error(f"File open error: {str(e)}")
 
     def load_profiles(self):
+        """Load server profiles"""
         try:
             if os.path.exists(self.profiles_file):
                 with open(self.profiles_file, 'r') as f:
@@ -477,6 +588,7 @@ class ServerManager(QMainWindow):
             logger.error(f"Profile load error: {str(e)}")
 
     def save_profiles(self):
+        """Save server profiles"""
         try:
             save_data = {
                 name: {k: v for k, v in data.items() if k != 'thread'} 
@@ -490,6 +602,7 @@ class ServerManager(QMainWindow):
             logger.error(f"Profile save error: {str(e)}")
 
     def update_server_list(self):
+        """Update server list display"""
         self.server_list.clear()
         for server_name in self.servers:
             item = QListWidgetItem(server_name)
@@ -499,6 +612,7 @@ class ServerManager(QMainWindow):
         logger.debug("Updated server list")
 
     def select_server(self, item):
+        """Handle server selection"""
         self.current_server = item.text()
         server_data = self.servers[self.current_server]
         self.file_model.setRootPath(server_data['path'])
@@ -507,6 +621,7 @@ class ServerManager(QMainWindow):
         logger.info(f"Selected server: {self.current_server}")
 
     def update_controls(self):
+        """Update UI control states"""
         has_selection = self.current_server is not None
         self.btn_start.setEnabled(has_selection)
         self.btn_stop.setEnabled(has_selection)
@@ -519,6 +634,7 @@ class ServerManager(QMainWindow):
         logger.debug("Updated UI controls")
 
     def check_java(self):
+        """Verify Java installation"""
         try:
             result = subprocess.run(
                 ['java', '-version'],
@@ -540,6 +656,7 @@ class ServerManager(QMainWindow):
             logger.warning("Java runtime not found")
 
     def send_command(self):
+        """Send command to server"""
         cmd = self.command_input.text()
         self.command_input.clear()
         if not self.current_server:
@@ -557,6 +674,7 @@ class ServerManager(QMainWindow):
             logger.error(error_msg)
 
     def start_server(self):
+        """Start selected server"""
         if not self.current_server:
             return
             
@@ -590,6 +708,7 @@ class ServerManager(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to start server: {str(e)}")
 
     def stop_server(self):
+        """Stop running server"""
         if self.current_server and self.servers[self.current_server]['status'] == 'running':
             try:
                 self.send_command("stop")
@@ -604,10 +723,12 @@ class ServerManager(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to stop server: {str(e)}")
 
     def handle_server_output(self, message):
+        """Handle server console output"""
         self.console_output.append(message)
         logger.debug(f"Server output: {message}")
 
     def handle_server_stop(self):
+        """Handle server shutdown"""
         if self.current_server:
             self.servers[self.current_server]['status'] = 'stopped'
             self.servers[self.current_server]['thread'] = None
@@ -617,6 +738,7 @@ class ServerManager(QMainWindow):
             logger.info(f"Server stopped: {self.current_server}")
 
     def delete_server(self):
+        """Delete selected server"""
         if not self.current_server:
             return
             
@@ -624,7 +746,7 @@ class ServerManager(QMainWindow):
             self,
             "Delete Server",
             f"Delete '{self.current_server}'?",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.Yes | QDialogButtonBox.No
         )
         
         if reply == QMessageBox.Yes:
@@ -646,6 +768,12 @@ class ServerManager(QMainWindow):
                 logger.error(f"Server deletion error: {str(e)}")
 
     def safe_mod_search(self):
+        """Search Modrinth for mods"""
+        if not self.api_keys.get('modrinth'):
+            QMessageBox.warning(self, "Error", "Modrinth API key required!")
+            self.show_api_key_dialog()
+            return
+            
         for loader in self.current_image_loaders:
             if loader.isRunning():
                 loader.quit()
@@ -660,12 +788,13 @@ class ServerManager(QMainWindow):
         if query:
             self.progress.show()
             server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
-            self.search_thread = ModSearchThread(query, server_version)
+            self.search_thread = ModSearchThread(query, server_version, self.api_keys['modrinth'])
             self.search_thread.finished.connect(self.show_mods)
             self.search_thread.error.connect(self.show_mod_error)
             self.search_thread.start()
 
     def show_mods(self, mods):
+        """Display mod search results"""
         self.progress.hide()
         try:
             for mod in mods:
@@ -677,6 +806,7 @@ class ServerManager(QMainWindow):
             logger.error(f"Mod display error: {str(e)}")
 
     def create_mod_card(self, mod):
+        """Create mod UI card"""
         widget = QWidget()
         widget.setProperty("mod_id", mod['project_id'])
         widget.setFixedHeight(100)
@@ -721,12 +851,14 @@ class ServerManager(QMainWindow):
             self.set_fallback_icon(mod['project_id'])
 
     def load_mod_icon(self, mod_id, url):
+        """Load mod icon"""
         loader = ImageLoaderThread(url, mod_id)
         loader.loaded.connect(self.update_mod_icon)
         self.current_image_loaders.append(loader)
         loader.start()
 
     def update_mod_icon(self, mod_id, pixmap):
+        """Update mod icon display"""
         for i in range(self.mod_list_layout.count()):
             widget = self.mod_list_layout.itemAt(i).widget()
             if widget and widget.property("mod_id") == mod_id:
@@ -737,6 +869,7 @@ class ServerManager(QMainWindow):
                 break
 
     def set_fallback_icon(self, mod_id):
+        """Set fallback icon"""
         pixmap = QPixmap(80, 80)
         pixmap.fill(QColor(53, 53, 53))
         painter = QPainter(pixmap)
@@ -746,6 +879,12 @@ class ServerManager(QMainWindow):
         self.update_mod_icon(mod_id, pixmap)
 
     def install_mod(self, mod):
+        """Install selected mod"""
+        if not self.api_keys.get('modrinth'):
+            QMessageBox.warning(self, "Error", "Modrinth API key required!")
+            self.show_api_key_dialog()
+            return
+            
         if not self.current_server:
             QMessageBox.warning(self, "Error", "Select a server first!")
             return
@@ -756,7 +895,7 @@ class ServerManager(QMainWindow):
             
             versions = requests.get(
                 f"https://api.modrinth.com/v2/project/{mod['project_id']}/version",
-                headers={'Authorization': self.settings.get('modrinth_key', '')},
+                headers={'Authorization': self.api_keys['modrinth']},
                 timeout=10
             ).json()
             
@@ -782,18 +921,25 @@ class ServerManager(QMainWindow):
             logger.error(f"Mod installation error: {str(e)}")
 
     def show_mod_error(self, error):
+        """Handle mod search errors"""
         self.progress.hide()
         QMessageBox.critical(self, "Search Error", f"Mod search failed: {error}")
         logger.error(f"Mod search error: {error}")
 
     def safe_plugin_search(self):
-        query = self.plugin_search.text()
-        if not query or not self.settings.get('curseforge_key'):
+        """Search CurseForge for plugins"""
+        if not self.api_keys.get('curseforge'):
             QMessageBox.warning(self, "Error", "CurseForge API key required!")
+            self.show_api_key_dialog()
             return
             
+        query = self.plugin_search.text()
+        if not query:
+            return
+            
+        self.progress.show()
         try:
-            headers = {'x-api-key': self.settings['curseforge_key']}
+            headers = {'x-api-key': self.api_keys['curseforge']}
             response = requests.post(
                 'https://api.curseforge.com/v1/mods/search',
                 headers=headers,
@@ -810,100 +956,8 @@ class ServerManager(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Plugin search failed: {str(e)}")
             logger.error(f"Plugin search error: {str(e)}")
-
-    def show_plugins(self, plugins):
-        while self.plugin_list_layout.count():
-            item = self.plugin_list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        try:
-            for plugin in plugins:
-                self.create_plugin_card(plugin)
-            self.plugin_list_layout.addStretch()
-            logger.info(f"Displayed {len(plugins)} plugins")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to display plugins: {str(e)}")
-            logger.error(f"Plugin display error: {str(e)}")
-
-    def create_plugin_card(self, plugin):
-        widget = QWidget()
-        widget.setFixedHeight(100)
-        
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(5, 5, 5, 5)
-        
-        text_layout = QVBoxLayout()
-        title = QLabel(f"<b>{plugin['name']}</b>")
-        title.setStyleSheet("color: white; font-size: 14px;")
-        desc = QLabel(plugin.get('summary', 'No description'))
-        desc.setStyleSheet("color: #AAAAAA;")
-        desc.setWordWrap(True)
-        text_layout.addWidget(title)
-        text_layout.addWidget(desc)
-        
-        install_btn = QPushButton("Install")
-        install_btn.setStyleSheet("""
-            QPushButton {
-                background: #505050;
-                color: white;
-                border: none;
-                padding: 5px;
-                min-width: 80px;
-            }
-            QPushButton:hover { background: #606060; }
-        """)
-        install_btn.clicked.connect(lambda _, p=plugin: self.install_plugin(p))
-        
-        layout.addLayout(text_layout)
-        layout.addWidget(install_btn)
-        self.plugin_list_layout.addWidget(widget)
-
-    def install_plugin(self, plugin):
-        if not self.current_server:
-            QMessageBox.warning(self, "Error", "Select a server first!")
-            return
-            
-        try:
-            server_path = self.servers[self.current_server]['path']
-            plugins_dir = os.path.join(server_path, "plugins")
-            os.makedirs(plugins_dir, exist_ok=True)
-            
-            file = plugin['latestFiles'][0]
-            download_url = file['downloadUrl']
-            
-            if not download_url:
-                QMessageBox.warning(self, "Error", "No download available!")
-                return
-                
-            self.download_file(download_url, os.path.join(plugins_dir, file['fileName']))
-            QMessageBox.information(self, "Success", f"Installed {plugin['name']}!")
-            logger.info(f"Installed plugin: {plugin['name']}")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Install failed: {str(e)}")
-            logger.error(f"Plugin installation error: {str(e)}")
-
-    def load_settings(self):
-        try:
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
-                    self.settings = json.load(f)
-                    logger.info("Loaded settings")
-        except Exception as e:
-            logger.error(f"Settings load error: {str(e)}")
-
-    def save_settings(self):
-        try:
-            self.settings['curseforge_key'] = self.curseforge_key.text()
-            self.settings['modrinth_key'] = self.modrinth_key.text()
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.settings, f)
-            logger.info("Saved settings")
-            QMessageBox.information(self, "Success", "Settings saved!")
-        except Exception as e:
-            logger.error(f"Settings save error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to save settings: {str(e)}")
+        finally:
+            self.progress.hide()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
