@@ -463,28 +463,32 @@ class ServerManager(QMainWindow):
 
     def create_url_section(self, target_type):
         url_layout = QVBoxLayout()
+        url_layout.setContentsMargins(0, 2, 0, 2)  # Reduced vertical margins
+        url_layout.setSpacing(3)  # Reduced spacing between elements
+
         url_input = QTextEdit()
         url_input.setPlaceholderText(f"Paste {target_type} URLs (one per line)...")
         url_input.setMaximumHeight(60)
-        
+        url_input.setStyleSheet("padding: 2px;")  # Add internal padding
+
         progress = QProgressBar()
         progress.setFixedHeight(20)
         status = QLabel()
         status.setFixedHeight(18)
-        
+
         install_btn = QPushButton(f"Install {target_type.capitalize()}")
         install_btn.clicked.connect(lambda _, tt=target_type: self.start_url_install(tt))
-        
+
         url_layout.addWidget(QLabel(f"Install from URLs:"))
         url_layout.addWidget(url_input)
         url_layout.addWidget(progress)
         url_layout.addWidget(status)
         url_layout.addWidget(install_btn)
-        
+
         setattr(self, f"{target_type}_url_input", url_input)
         setattr(self, f"{target_type}_progress", progress)
         setattr(self, f"{target_type}_status", status)
-        
+    
         return url_layout
 
     def refresh_file_view(self):
