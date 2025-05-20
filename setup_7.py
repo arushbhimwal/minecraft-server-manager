@@ -11,6 +11,8 @@ import random
 import tempfile
 import zipfile
 from datetime import datetime
+from functools import lru_cache
+from cryptography.fernet import Fernet
 from mcrcon import MCRcon
 
 from PySide6.QtWidgets import (
@@ -20,27 +22,65 @@ from PySide6.QtWidgets import (
     QInputDialog, QListWidget, QListWidgetItem, QProgressBar,
     QScrollArea, QSizePolicy, QFormLayout, QDialog, QDialogButtonBox
 )
-from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QKeySequence,QShortcut
+from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QKeySequence, QShortcut
 from PySide6.QtCore import Qt, QThread, Signal, QDir, QStandardPaths
 import qdarktheme
 
-# Constants
-DEFAULT_USER_AGENT = "MinecraftServerManager/1.0"
-PROFILES_FILE = "profiles.json"
-SETTINGS_FILE = "settings.json"
-MAX_CONSOLE_LINES = 1000
-RCON_TIMEOUT = 5
+#region Constants
+class Constants:
+    SERVER_STATUS = {"STOPPED": "stopped", "RUNNING": "running", "STARTING": "starting"}
+    FILE_PATHS = {"SERVER_JAR": "server.jar", "SERVER_PROPERTIES": "server.properties", "EULA_FILE": "eula.txt"}
+    API_ENDPOINTS = {
+        "MODRINTH_VERSIONS": "https://api.modrinth.com/v2/tag/game_version",
+        "PAPER_VERSIONS": "https://api.papermc.io/v2/projects/paper"
+    }
+    MAX_CONSOLE_LINES = 1000
+    RCON_TIMEOUT = 5
+    BACKUP_DIR = "backups"
+    SECURITY_KEY_FILE = ".encryption.key"
+#endregion
 
+#region Security
+class SecureSettings:
+    def __init__(self):
+        self.cipher = self._get_cipher()
+        
+    def _get_cipher(self):
+        if not os.path.exists(Constants.SECURITY_KEY_FILE):
+            key = Fernet.generate_key()
+            with open(Constants.SECURITY_KEY_FILE, 'wb') as f: f.write(key)
+        else:
+            with open(Constants.SECURITY_KEY_FILE, 'rb') as f: key = f.read()
+        return Fernet(key)
+    
+    def encrypt(self, data): return self.cipher.encrypt(data.encode()).decode()
+    def decrypt(self, encrypted_data): return self.cipher.decrypt(encrypted_data.encode()).decode()
+#endregion
+
+#region API Handlers
+class ModrinthAPI:
+    @lru_cache(maxsize=100)
+    def get_versions(self, project_id):
+        response = requests.get(f'https://api.modrinth.com/v2/project/{project_id}/version')
+        return response.json()
+
+class CurseForgeAPI:
+    @lru_cache(maxsize=100)
+    def get_file_info(self, file_id, api_key):
+        response = requests.get(f'https://api.curseforge.com/v1/mods/files/{file_id}',
+            headers={'x-api-key': api_key})
+        return response.json()
+#endregion
+
+#region Threads
 class ImageLoaderThread(QThread):
     loaded = Signal(str, QPixmap)
-
     def __init__(self, url, item_id):
         super().__init__()
         self.url = url
         self.item_id = item_id
-
     def run(self):
-        try:
+        try: 
             response = requests.get(self.url, timeout=10)
             if response.status_code == 200:
                 image = QImage()
@@ -56,6 +96,7 @@ class ImageLoaderThread(QThread):
             painter.end()
             self.loaded.emit(self.item_id, pixmap)
 
+#region Threads (continued)
 class ServerThread(QThread):
     output = Signal(str)
     stopped = Signal()
@@ -129,7 +170,7 @@ class ModSearchThread(QThread):
             if self.mc_version:
                 facets.append([f"versions:{self.mc_version}"])
 
-            headers = {'User-Agent': DEFAULT_USER_AGENT}
+            headers = {'User-Agent': Constants.API_ENDPOINTS["DEFAULT_USER_AGENT"]}
             response = requests.get(
                 f"https://api.modrinth.com/v2/search?query={self.query}&facets={json.dumps(facets)}",
                 headers=headers,
@@ -156,11 +197,7 @@ class CurseForgeSearchThread(QThread):
             response = requests.post(
                 'https://api.curseforge.com/v1/mods/search',
                 headers=headers,
-                json={
-                    'gameId': 432,
-                    'searchFilter': self.query,
-                    'classId': self.class_id
-                },
+                json={'gameId': 432, 'searchFilter': self.query, 'classId': self.class_id},
                 timeout=10
             )
             response.raise_for_status()
@@ -274,6 +311,34 @@ class UrlInstallThread(QThread):
                         return line.split('=')[1].strip()
         return None
 
+#endregion
+
+#region Backup System
+class BackupManager:
+    def __init__(self, server_path):
+        self.server_path = server_path
+        self.backup_dir = os.path.join(server_path, Constants.BACKUP_DIR)
+        
+    def create_backup(self):
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = os.path.join(self.backup_dir, f"backup-{timestamp}.zip")
+        os.makedirs(self.backup_dir, exist_ok=True)
+        
+        try:
+            with zipfile.ZipFile(backup_path, 'w') as zipf:
+                for root, _, files in os.walk(self.server_path):
+                    for file in files:
+                        if Constants.BACKUP_DIR not in root:
+                            full_path = os.path.join(root, file)
+                            arcname = os.path.relpath(full_path, self.server_path)
+                            zipf.write(full_path, arcname)
+            return backup_path
+        except Exception as e:
+            logging.error(f"Backup failed: {str(e)}")
+            raise
+#endregion
+
+#region Main Application
 class ServerManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -283,51 +348,82 @@ class ServerManager(QMainWindow):
         self.current_server = None
         self.current_image_loaders = []
         self.api_keys = {'curseforge': ''}
+        self.secure_settings = SecureSettings()
         
+        # Initialize UI and components
         self.init_ui()
         self.load_profiles()
         self.check_java()
         self.check_api_keys()
+        self.setup_logging()
+        self.setStyleSheet(self.get_style_sheet())
         self.statusBar().showMessage("Ready")
+
+    def setup_logging(self):
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[logging.FileHandler('server_manager.log', encoding='utf-8')]
+        )
+
+    def get_style_sheet(self):
+        return """
+            QTextEdit, QLineEdit, QComboBox { padding: 3px; margin: 1px; }
+            QPushButton { min-height: 25px; margin: 2px; }
+            QTabWidget::pane { border: 1px solid #444; margin: 2px; }
+            QProgressBar { text-align: center; }
+            QLabel { margin: 2px; }
+        """
 
     def init_ui(self):
         self.setWindowTitle("Minecraft Server Manager")
         self.setGeometry(100, 100, 1200, 800)
-        
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        # Left panel - Server list
+        # Left Panel
         server_list_panel = QWidget()
         server_list_layout = QVBoxLayout(server_list_panel)
-        self.server_list = QListWidget()
-        self.server_list.itemClicked.connect(self.select_server)
-        server_list_layout.addWidget(QLabel("Servers:"))
-        server_list_layout.addWidget(self.server_list)
-        
-        self.btn_start = QPushButton("Start Server")
-        self.btn_start.clicked.connect(self.start_server)
-        self.btn_stop = QPushButton("Stop Server")
-        self.btn_stop.clicked.connect(self.stop_server)
-        self.btn_delete = QPushButton("Delete Server")
-        self.btn_delete.clicked.connect(self.delete_server)
-        
-        server_list_layout.addWidget(self.btn_start)
-        server_list_layout.addWidget(self.btn_stop)
-        server_list_layout.addWidget(self.btn_delete)
+        self.setup_server_list(server_list_layout)
         main_layout.addWidget(server_list_panel, stretch=1)
 
-        # Right panel - Content
+        # Right Panel
         content_panel = QWidget()
         content_layout = QVBoxLayout(content_panel)
+        self.setup_creation_form(content_layout)
+        self.setup_tabs(content_layout)
+        main_layout.addWidget(content_panel, stretch=3)
+
+        # Shortcuts
+        self.setup_shortcuts()
+
+    def setup_server_list(self, layout):
+        self.server_list = QListWidget()
+        self.server_list.itemClicked.connect(self.select_server)
+        layout.addWidget(QLabel("Servers:"))
+        layout.addWidget(self.server_list)
         
-        # Server creation
+        buttons = [
+            ("Start Server", self.start_server),
+            ("Stop Server", self.stop_server),
+            ("Create Backup", self.create_backup),
+            ("Delete Server", self.delete_server)
+        ]
+        
+        for text, handler in buttons:
+            btn = QPushButton(text)
+            btn.clicked.connect(handler)
+            layout.addWidget(btn)
+
+    def setup_creation_form(self, layout):
         creation_layout = QHBoxLayout()
         self.server_path = QLineEdit()
         self.server_path.setPlaceholderText("Select server directory...")
+        
         btn_browse = QPushButton("Browse")
         btn_browse.clicked.connect(self.select_server_directory)
+        
         btn_create = QPushButton("Create Server")
         btn_create.clicked.connect(self.create_new_server)
         
@@ -335,48 +431,74 @@ class ServerManager(QMainWindow):
         creation_layout.addWidget(self.server_path)
         creation_layout.addWidget(btn_browse)
         creation_layout.addWidget(btn_create)
-        content_layout.addLayout(creation_layout)
+        layout.addLayout(creation_layout)
 
         # Configuration
         config_layout = QHBoxLayout()
         self.java_combo = QComboBox()
         self.java_combo.addItems(self.java_versions)
-        config_layout.addWidget(QLabel("Java Version:"))
-        config_layout.addWidget(self.java_combo)
         
         self.loader_combo = QComboBox()
         self.loader_combo.addItems(self.loaders)
         self.loader_combo.currentTextChanged.connect(self.update_versions)
-        config_layout.addWidget(QLabel("Loader:"))
-        config_layout.addWidget(self.loader_combo)
         
         self.version_combo = QComboBox()
+        
+        config_layout.addWidget(QLabel("Java:"))
+        config_layout.addWidget(self.java_combo)
+        config_layout.addWidget(QLabel("Loader:"))
+        config_layout.addWidget(self.loader_combo)
         config_layout.addWidget(QLabel("MC Version:"))
         config_layout.addWidget(self.version_combo)
-        content_layout.addLayout(config_layout)
+        layout.addLayout(config_layout)
 
-        # Progress bar
         self.progress = QProgressBar()
         self.progress.hide()
-        content_layout.addWidget(self.progress)
+        layout.addWidget(self.progress)
+#endregion
 
-        # Tabs
+#region Tab Components
+    def setup_tabs(self, layout):
         self.tabs = QTabWidget()
         
-        # Console tab
+        # Console Tab
         console_tab = QWidget()
-        console_layout = QVBoxLayout(console_tab)
+        self.setup_console_tab(console_tab)
+        self.tabs.addTab(console_tab, "Console")
+
+        # File Browser Tab
+        file_tab = QWidget()
+        self.setup_file_tab(file_tab)
+        self.tabs.addTab(file_tab, "Files")
+
+        # Mods Tab
+        mods_tab = QWidget()
+        self.setup_mods_tab(mods_tab)
+        self.tabs.addTab(mods_tab, "Mods")
+
+        # Plugins Tab
+        plugins_tab = QWidget()
+        self.setup_plugins_tab(plugins_tab)
+        self.tabs.addTab(plugins_tab, "Plugins")
+
+        # Settings Tab
+        settings_tab = QWidget()
+        self.setup_settings_tab(settings_tab)
+        self.tabs.addTab(settings_tab, "Settings")
+
+        layout.addWidget(self.tabs)
+
+    def setup_console_tab(self, parent):
+        layout = QVBoxLayout(parent)
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.command_input = QLineEdit()
         self.command_input.returnPressed.connect(self.send_command)
-        console_layout.addWidget(self.console_output)
-        console_layout.addWidget(self.command_input)
-        self.tabs.addTab(console_tab, "Console")
+        layout.addWidget(self.console_output)
+        layout.addWidget(self.command_input)
 
-        # File browser tab
-        file_tab = QWidget()
-        file_layout = QVBoxLayout(file_tab)
+    def setup_file_tab(self, parent):
+        layout = QVBoxLayout(parent)
         self.file_model = QFileSystemModel()
         self.file_model.setRootPath(QDir.currentPath())
         self.file_view = QTreeView()
@@ -384,161 +506,157 @@ class ServerManager(QMainWindow):
         self.file_view.doubleClicked.connect(self.open_file)
         btn_refresh = QPushButton("Refresh")
         btn_refresh.clicked.connect(self.refresh_file_view)
-        file_layout.addWidget(self.file_view)
-        file_layout.addWidget(btn_refresh)
-        self.tabs.addTab(file_tab, "Files")
+        layout.addWidget(self.file_view)
+        layout.addWidget(btn_refresh)
 
-        # Mods tab
-        mods_tab = QWidget()
-        mods_layout = QVBoxLayout(mods_tab)
-        mods_layout.addLayout(self.create_url_section("mods"))
+    def setup_mods_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.addLayout(self.create_url_section("mods"))
         
-        mods_platform_layout = QHBoxLayout()
+        # Platform Selection
+        platform_layout = QHBoxLayout()
         self.mods_platform_combo = QComboBox()
         self.mods_platform_combo.addItems(["Modrinth", "CurseForge"])
-        mods_platform_layout.addWidget(QLabel("Source:"))
-        mods_platform_layout.addWidget(self.mods_platform_combo)
-        mods_layout.addLayout(mods_platform_layout)
-        
-        mods_search_layout = QHBoxLayout()
+        platform_layout.addWidget(QLabel("Source:"))
+        platform_layout.addWidget(self.mods_platform_combo)
+        layout.addLayout(platform_layout)
+
+        # Search Section
+        search_layout = QHBoxLayout()
         self.mod_search = QLineEdit()
         self.mod_search.setPlaceholderText("Search mods...")
-        btn_mod_search = QPushButton("Search")
-        btn_mod_search.clicked.connect(self.safe_mod_search)
-        mods_search_layout.addWidget(self.mod_search)
-        mods_search_layout.addWidget(btn_mod_search)
-        mods_layout.addLayout(mods_search_layout)
-        
-        mods_scroll = QScrollArea()
-        mods_scroll.setWidgetResizable(True)
+        btn_search = QPushButton("Search")
+        btn_search.clicked.connect(self.safe_mod_search)
+        search_layout.addWidget(self.mod_search)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+
+        # Results List
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         self.mod_list_container = QWidget()
         self.mod_list_layout = QVBoxLayout(self.mod_list_container)
-        mods_scroll.setWidget(self.mod_list_container)
-        mods_layout.addWidget(mods_scroll)
-        self.tabs.addTab(mods_tab, "Mods")
+        scroll.setWidget(self.mod_list_container)
+        layout.addWidget(scroll)
 
-        # Plugins tab
-        plugins_tab = QWidget()
-        plugins_layout = QVBoxLayout(plugins_tab)
-        plugins_layout.addLayout(self.create_url_section("plugins"))
+    def setup_plugins_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        layout.addLayout(self.create_url_section("plugins"))
         
-        plugins_platform_layout = QHBoxLayout()
+        # Platform Selection
+        platform_layout = QHBoxLayout()
         self.plugins_platform_combo = QComboBox()
         self.plugins_platform_combo.addItems(["CurseForge", "Modrinth"])
-        plugins_platform_layout.addWidget(QLabel("Source:"))
-        plugins_platform_layout.addWidget(self.plugins_platform_combo)
-        plugins_layout.addLayout(plugins_platform_layout)
-        
-        plugins_search_layout = QHBoxLayout()
+        platform_layout.addWidget(QLabel("Source:"))
+        platform_layout.addWidget(self.plugins_platform_combo)
+        layout.addLayout(platform_layout)
+
+        # Search Section
+        search_layout = QHBoxLayout()
         self.plugin_search = QLineEdit()
         self.plugin_search.setPlaceholderText("Search plugins...")
-        btn_plugin_search = QPushButton("Search")
-        btn_plugin_search.clicked.connect(self.safe_plugin_search)
-        plugins_search_layout.addWidget(self.plugin_search)
-        plugins_search_layout.addWidget(btn_plugin_search)
-        plugins_layout.addLayout(plugins_search_layout)
-        
-        plugins_scroll = QScrollArea()
-        plugins_scroll.setWidgetResizable(True)
+        btn_search = QPushButton("Search")
+        btn_search.clicked.connect(self.safe_plugin_search)
+        search_layout.addWidget(self.plugin_search)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+
+        # Results List
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         self.plugin_list_container = QWidget()
         self.plugin_list_layout = QVBoxLayout(self.plugin_list_container)
-        plugins_scroll.setWidget(self.plugin_list_container)
-        plugins_layout.addWidget(plugins_scroll)
-        self.tabs.addTab(plugins_tab, "Plugins")
+        scroll.setWidget(self.plugin_list_container)
+        layout.addWidget(scroll)
 
-        # Settings tab
-        settings_tab = QWidget()
-        settings_layout = QFormLayout(settings_tab)
+    def setup_settings_tab(self, parent):
+        layout = QFormLayout(parent)
         self.curseforge_key_input = QLineEdit()
         self.curseforge_key_input.setPlaceholderText("Enter CurseForge API key...")
-        settings_layout.addRow("CurseForge API Key:", self.curseforge_key_input)
         btn_save = QPushButton("Save API Key")
         btn_save.clicked.connect(self.save_api_keys)
-        settings_layout.addRow(btn_save)
-        self.tabs.addTab(settings_tab, "Settings")
-
-        content_layout.addWidget(self.tabs)
-        main_layout.addWidget(content_panel, stretch=3)
-        
-        # Shortcuts
-        self.shortcut_send = QShortcut(QKeySequence("Ctrl+Return"), self)
-        self.shortcut_send.activated.connect(self.send_command)
-        
-        self.update_controls()
+        layout.addRow("CurseForge API Key:", self.curseforge_key_input)
+        layout.addRow(btn_save)
 
     def create_url_section(self, target_type):
         url_layout = QVBoxLayout()
-        url_layout.setContentsMargins(0, 2, 0, 2)  # Reduced vertical margins
-        url_layout.setSpacing(3)  # Reduced spacing between elements
-
+        url_layout.setContentsMargins(0, 2, 0, 2)
+        url_layout.setSpacing(3)
+        
         url_input = QTextEdit()
         url_input.setPlaceholderText(f"Paste {target_type} URLs (one per line)...")
         url_input.setMaximumHeight(60)
-        url_input.setStyleSheet("padding: 2px;")  # Add internal padding
-
+        url_input.setStyleSheet("padding: 2px;")
+        
         progress = QProgressBar()
         progress.setFixedHeight(20)
         status = QLabel()
         status.setFixedHeight(18)
-
+        
         install_btn = QPushButton(f"Install {target_type.capitalize()}")
         install_btn.clicked.connect(lambda _, tt=target_type: self.start_url_install(tt))
-
+        
         url_layout.addWidget(QLabel(f"Install from URLs:"))
         url_layout.addWidget(url_input)
         url_layout.addWidget(progress)
         url_layout.addWidget(status)
         url_layout.addWidget(install_btn)
-
+        
         setattr(self, f"{target_type}_url_input", url_input)
         setattr(self, f"{target_type}_progress", progress)
         setattr(self, f"{target_type}_status", status)
-    
+        
         return url_layout
+#endregion
 
+#region Core Functionality
     def refresh_file_view(self):
         if self.current_server:
-            root_index = self.file_model.index(self.servers[self.current_server]['path'])
-            self.file_view.setRootIndex(root_index)
+            self.file_view.setRootIndex(self.file_model.index(
+                self.servers[self.current_server]['path']
+            ))
 
     def validate_server_name(self, name):
         if not name.strip():
             raise ValueError("Server name cannot be empty!")
         if re.search(r'[<>:"/\\|?*]', name):
             raise ValueError("Invalid characters in server name!")
-        if name in self.servers:
-            raise ValueError("Server name already exists!")
+        if len(name) > 32:
+            raise ValueError("Server name too long (max 32 characters)")
+        if name.lower() in [n.lower() for n in self.servers]:
+            raise ValueError("Server name already exists (case-insensitive)")
 
     def load_profiles(self):
         try:
-            if os.path.exists(PROFILES_FILE):
-                with open(PROFILES_FILE, 'r') as f:
+            if os.path.exists(Constants.FILE_PATHS["PROFILES_FILE"]):
+                with open(Constants.FILE_PATHS["PROFILES_FILE"], 'r') as f:
                     self.servers = json.load(f)
                     for server in self.servers.values():
                         server['thread'] = None
                     self.update_server_list()
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load profiles: {str(e)}")
+            self.show_error(f"Failed to load profiles: {str(e)}")
 
     def save_profiles(self):
         try:
-            with open(PROFILES_FILE, 'w') as f:
-                save_data = {}
-                for name, data in self.servers.items():
-                    save_data[name] = {k:v for k,v in data.items() if k != 'thread'}
+            with open(Constants.FILE_PATHS["PROFILES_FILE"], 'w') as f:
+                save_data = {name: {k:v for k,v in data.items() if k != 'thread'} 
+                           for name, data in self.servers.items()}
                 json.dump(save_data, f, indent=2)
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save profiles: {str(e)}")
+            self.show_error(f"Failed to save profiles: {str(e)}")
 
     def check_api_keys(self):
         try:
-            if os.path.exists(SETTINGS_FILE):
-                with open(SETTINGS_FILE, 'r') as f:
-                    self.api_keys = json.load(f)
+            if os.path.exists(Constants.FILE_PATHS["SETTINGS_FILE"]):
+                with open(Constants.FILE_PATHS["SETTINGS_FILE"], 'r') as f:
+                    encrypted = f.read()
+                    self.api_keys = json.loads(self.secure_settings.decrypt(encrypted))
                     self.curseforge_key_input.setText(self.api_keys.get('curseforge', ''))
         except Exception as e:
-            logging.error(f"Settings load failed: {str(e)}")
+            logging.error(f"Secure load failed: {str(e)}")
 
+#region Server Operations
     def select_server_directory(self):
         path = QFileDialog.getExistingDirectory(
             self, "Select Directory", QDir.homePath(), QFileDialog.ShowDirsOnly
@@ -548,7 +666,7 @@ class ServerManager(QMainWindow):
 
     def create_new_server(self):
         if not self.server_path.text():
-            QMessageBox.warning(self, "Error", "Select server directory first!")
+            self.show_error("Select server directory first!")
             return
         
         name, ok = QInputDialog.getText(self, "Server Name", "Enter server name:")
@@ -557,7 +675,7 @@ class ServerManager(QMainWindow):
                 self.validate_server_name(name)
                 self.setup_server(name)
             except ValueError as e:
-                QMessageBox.warning(self, "Error", str(e))
+                self.show_error(str(e))
 
     def setup_server(self, name):
         server_dir = os.path.join(self.server_path.text(), name)
@@ -568,44 +686,33 @@ class ServerManager(QMainWindow):
             
             self.servers[name] = {
                 "path": server_dir,
-                "status": "stopped",
+                "status": Constants.SERVER_STATUS["STOPPED"],
                 "max_ram": "2G",
                 "mc_version": version,
                 "thread": None
             }
             
             # Download server jar
+            jar_path = os.path.join(server_dir, Constants.FILE_PATHS["SERVER_JAR"])
             if loader == "Vanilla":
-                url = self.get_vanilla_url(version)
+                self.download_file(self.get_vanilla_url(version), jar_path)
             elif loader == "Paper":
-                url = self.get_paper_url(version)
+                self.download_file(self.get_paper_url(version), jar_path)
             else:
                 raise ValueError("Unsupported loader")
             
-            self.download_file(url, os.path.join(server_dir, "server.jar"))
             self.create_server_properties(server_dir)
-            
-            # Create eula.txt
-            with open(os.path.join(server_dir, "eula.txt"), 'w') as f:
-                f.write("eula=true\n")
-            
+            self.create_eula_file(server_dir)
             self.save_profiles()
             self.update_server_list()
-            QMessageBox.information(self, "Success", f"Server '{name}' created!")
+            self.show_info(f"Server '{name}' created!")
         except Exception as e:
-            logging.error(f"Server creation failed: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Server creation failed: {str(e)}")
-            if os.path.exists(server_dir):
-                self.cleanup_server_dir(server_dir)
+            self.show_error(f"Creation failed: {str(e)}")
+            self.cleanup_server_dir(server_dir)
 
-    def cleanup_server_dir(self, path):
-        try:
-            if platform.system() == "Windows":
-                subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', path], check=True)
-            else:
-                subprocess.run(["rm", "-rf", path], check=True)
-        except Exception as e:
-            logging.error(f"Cleanup failed: {str(e)}")
+    def create_eula_file(self, path):
+        with open(os.path.join(path, Constants.FILE_PATHS["EULA_FILE"]), 'w') as f:
+            f.write("eula=true\n")
 
     def update_versions(self, loader_name):
         self.version_combo.clear()
@@ -614,14 +721,11 @@ class ServerManager(QMainWindow):
         
         try:
             if loader_name == "Vanilla":
-                response = requests.get("https://piston-meta.mojang.com/mc/game/version_manifest.json", timeout=10)
+                response = requests.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"], timeout=10)
                 versions = [v['id'] for v in response.json()['versions'] if v['type'] == 'release']
             elif loader_name == "Paper":
-                response = requests.get("https://api.papermc.io/v2/projects/paper", timeout=10)
+                response = requests.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"], timeout=10)
                 versions = response.json()['versions'][::-1]
-            elif loader_name == "Fabric":
-                response = requests.get("https://meta.fabricmc.net/v2/versions/game", timeout=10)
-                versions = [v['version'] for v in response.json()]
             else:
                 versions = ["Version selection not implemented"]
             
@@ -629,12 +733,10 @@ class ServerManager(QMainWindow):
             self.progress.hide()
             self.statusBar().showMessage("Versions loaded", 3000)
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to fetch versions: {str(e)}")
-            self.progress.hide()
-            self.statusBar().showMessage("Version fetch failed", 3000)
+            self.show_error(f"Version fetch failed: {str(e)}")
 
     def get_vanilla_url(self, version):
-        manifest = requests.get("https://piston-meta.mojang.com/mc/game/version_manifest.json").json()
+        manifest = requests.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"]).json()
         for v in manifest['versions']:
             if v['id'] == version and v['type'] == "release":
                 version_data = requests.get(v['url']).json()
@@ -642,18 +744,18 @@ class ServerManager(QMainWindow):
         raise ValueError("Version not found")
 
     def get_paper_url(self, version):
-        builds = requests.get(f"https://api.papermc.io/v2/projects/paper/versions/{version}").json()
+        builds = requests.get(f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/{version}").json()
         if not builds['builds']:
             raise ValueError("No builds found")
         latest = builds['builds'][-1]
-        return f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds/{latest}/downloads/paper-{version}-{latest}.jar"
+        return f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/{version}/builds/{latest}/downloads/paper-{version}-{latest}.jar"
 
     def update_server_list(self):
         self.server_list.clear()
         for server_name in self.servers:
             item = QListWidgetItem(server_name)
-            status = self.servers[server_name].get('status', 'stopped')
-            item.setForeground(Qt.green if status == 'running' else Qt.red)
+            status = self.servers[server_name].get('status', Constants.SERVER_STATUS["STOPPED"])
+            item.setForeground(Qt.green if status == Constants.SERVER_STATUS["RUNNING"] else Qt.red)
             self.server_list.addItem(item)
 
     def select_server(self, item):
@@ -670,24 +772,9 @@ class ServerManager(QMainWindow):
         self.btn_delete.setEnabled(has_selection)
         
         if has_selection:
-            status = self.servers[self.current_server].get('status', 'stopped')
-            self.btn_start.setEnabled(status == 'stopped')
-            self.btn_stop.setEnabled(status == 'running')
-
-    def check_java(self):
-        try:
-            result = subprocess.run(
-                ['java', '-version'],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            version_info = result.stderr.splitlines()[0]
-            detected_version = version_info.split()[2].strip('\"').split('.')[0]
-            if detected_version in self.java_versions:
-                self.java_combo.setCurrentText(detected_version)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            QMessageBox.warning(self, "Java Not Found", "Java runtime not detected!")
+            status = self.servers[self.current_server].get('status', Constants.SERVER_STATUS["STOPPED"])
+            self.btn_start.setEnabled(status == Constants.SERVER_STATUS["STOPPED"])
+            self.btn_stop.setEnabled(status == Constants.SERVER_STATUS["RUNNING"])
 
     def send_command(self):
         cmd = self.command_input.text()
@@ -697,40 +784,34 @@ class ServerManager(QMainWindow):
         
         try:
             server = self.servers[self.current_server]
-            props_path = os.path.join(server['path'], "server.properties")
-            if not os.path.exists(props_path):
-                raise FileNotFoundError("server.properties not found")
+            props_path = os.path.join(server['path'], Constants.FILE_PATHS["SERVER_PROPERTIES"])
             
             with open(props_path, 'r') as f:
-                for line in f:
-                    if line.startswith('rcon.password='):
-                        password = line.split('=')[1].strip()
-                    if line.startswith('rcon.port='):
-                        port = int(line.split('=')[1].strip())
+                config = {line.split('=')[0]: line.split('=')[1].strip() 
+                        for line in f if '=' in line}
             
-            with MCRcon("localhost", password, port, timeout=RCON_TIMEOUT) as mcr:
+            with MCRcon("localhost", config['rcon.password'], int(config['rcon.port']), 
+                      timeout=Constants.RCON_TIMEOUT) as mcr:
                 response = mcr.command(cmd)
                 self.console_output.append(f"> {cmd}\n{response}")
         except ConnectionRefusedError:
-            self.console_output.append("RCON Error: Connection refused - check if RCON is enabled")
-            self.statusBar().showMessage("RCON Connection Failed", 5000)
+            self.show_error("RCON connection refused - check if enabled")
         except Exception as e:
-            logging.error(f"Command error: {str(e)}")
-            self.console_output.append(f"Error: {str(e)}")
+            self.show_error(f"Command failed: {str(e)}")
 
     def start_server(self):
         if not self.current_server:
             return
         
         server = self.servers[self.current_server]
-        if server['status'] == 'stopped':
+        if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
             try:
                 java_path = "java.exe" if platform.system() == "Windows" else "java"
                 command = [
                     java_path,
                     f"-Xmx{server.get('max_ram', '2G')}",
                     "-jar",
-                    "server.jar",
+                    Constants.FILE_PATHS["SERVER_JAR"],
                     "nogui"
                 ]
                 
@@ -738,55 +819,57 @@ class ServerManager(QMainWindow):
                 server['thread'].output.connect(self.handle_server_output)
                 server['thread'].stopped.connect(self.handle_server_stop)
                 server['thread'].start()
-                server['status'] = 'running'
+                server['status'] = Constants.SERVER_STATUS["RUNNING"]
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Server starting...", 3000)
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to start server: {str(e)}")
-                self.statusBar().showMessage("Start failed", 3000)
+                self.show_error(f"Start failed: {str(e)}")
 
     def handle_server_output(self, message):
         try:
             self.console_output.append(message)
-            current_lines = self.console_output.document().lineCount()
-            if current_lines > MAX_CONSOLE_LINES:
+            # Error detection
+            if any(e in message for e in ["ERROR", "Exception", "Crash"]):
+                logger.error(f"Server Error: {message}")
+                self.show_error_notification(message)
+            
+            # Line limit management
+            if self.console_output.document().lineCount() > Constants.MAX_CONSOLE_LINES:
                 cursor = self.console_output.textCursor()
                 cursor.movePosition(cursor.Start)
                 cursor.select(cursor.LineUnderCursor)
                 cursor.removeSelectedText()
         except Exception as e:
-            logging.error(f"Output handling error: {str(e)}")
+            logger.error(f"Output handling error: {str(e)}")
 
     def handle_server_stop(self):
         if self.current_server:
-            self.servers[self.current_server]['status'] = 'stopped'
-            self.servers[self.current_server]['thread'] = None
+            server = self.servers[self.current_server]
+            server['status'] = Constants.SERVER_STATUS["STOPPED"]
+            server['thread'] = None
             self.save_profiles()
             self.update_server_list()
             self.statusBar().showMessage("Server stopped", 3000)
 
     def stop_server(self):
-        if self.current_server and self.servers[self.current_server]['status'] == 'running':
+        if self.current_server and self.servers[self.current_server]['status'] == Constants.SERVER_STATUS["RUNNING"]:
             try:
                 self.send_command("stop")
                 self.servers[self.current_server]['thread'].stop()
-                self.servers[self.current_server]['status'] = 'stopping'
+                self.servers[self.current_server]['status'] = Constants.SERVER_STATUS["STOPPING"]
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Stopping server...", 3000)
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to stop server: {str(e)}")
-                self.statusBar().showMessage("Stop failed", 3000)
+                self.show_error(f"Stop failed: {str(e)}")
 
     def delete_server(self):
         if not self.current_server:
             return
         
         reply = QMessageBox.question(
-            self,
-            "Delete Server",
-            f"Permanently delete '{self.current_server}'?",
+            self, "Delete Server", f"Permanently delete '{self.current_server}'?",
             QMessageBox.Yes | QMessageBox.No
         )
         
@@ -804,35 +887,18 @@ class ServerManager(QMainWindow):
                 self.update_server_list()
                 self.statusBar().showMessage("Server deleted", 3000)
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Delete failed: {str(e)}")
-                self.statusBar().showMessage("Delete failed", 3000)
+                self.show_error(f"Delete failed: {str(e)}")
 
-    def create_server_properties(self, server_dir):
-        password = self.generate_password()
-        with open(os.path.join(server_dir, "rcon_password.txt"), 'w') as f:
-            f.write(f"RCON Password: {password}\n")
-        
-        default_props = {
-            "server-port": str(random.randint(25000, 30000)),
-            "max-players": "20",
-            "online-mode": "true",
-            "enable-rcon": "true",
-            "rcon.password": password,
-            "rcon.port": str(random.randint(25000, 30000))
-        }
-        
-        with open(os.path.join(server_dir, "server.properties"), 'w') as f:
-            for key, value in default_props.items():
-                f.write(f"{key}={value}\n")
-
-    def generate_password(self):
+    def create_backup(self):
+        if not self.current_server:
+            return
+            
         try:
-            return subprocess.check_output(
-                ['openssl', 'rand', '-base64', '12'], 
-                universal_newlines=True
-            ).strip()
-        except Exception:
-            return str(os.urandom(12).hex())
+            server_path = self.servers[self.current_server]['path']
+            backup_path = BackupManager(server_path).create_backup()
+            self.show_info(f"Backup created: {os.path.basename(backup_path)}")
+        except Exception as e:
+            self.show_error(f"Backup failed: {str(e)}")
 
     def open_file(self, index):
         path = self.file_model.filePath(index)
@@ -844,15 +910,17 @@ class ServerManager(QMainWindow):
                     opener = "open" if platform.system() == "Darwin" else "xdg-open"
                     subprocess.run([opener, path])
             except Exception as e:
-                QMessageBox.warning(self, "Error", f"Could not open file: {str(e)}")
+                self.show_error(f"Open failed: {str(e)}")
+#endregion
 
+#region Mod/Plugin Management
     def safe_mod_search(self):
         platform = self.mods_platform_combo.currentText()
         query = self.mod_search.text()
         
         if not query:
             return
-        
+            
         self.progress.show()
         self.statusBar().showMessage("Searching mods...")
         
@@ -860,101 +928,21 @@ class ServerManager(QMainWindow):
             if platform == "Modrinth":
                 server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
                 self.search_thread = ModSearchThread(query, server_version, self.loader_combo.currentText())
-                self.search_thread.finished.connect(self.show_mods)
+                self.search_thread.finished.connect(lambda data: self.show_mods(self._format_modrinth_results(data)))
             elif platform == "CurseForge":
                 if not self.api_keys.get('curseforge'):
-                    QMessageBox.warning(self, "Error", "CurseForge API key required!")
+                    self.show_error("CurseForge API key required!")
                     return
                 self.search_thread = CurseForgeSearchThread(query, 6, self.api_keys['curseforge'])
-                self.search_thread.finished.connect(lambda data: self.show_mods(self._format_cf_mods(data)))
+                self.search_thread.finished.connect(lambda data: self.show_mods(self._format_curseforge_results(data)))
             
             self.search_thread.error.connect(self.show_search_error)
             self.search_thread.start()
         except Exception as e:
             self.progress.hide()
-            QMessageBox.critical(self, "Error", f"Search failed: {str(e)}")
-            self.statusBar().showMessage("Search failed", 3000)
-
-    def show_mods(self, mods):
-        self.progress.hide()
-        self.clear_layout(self.mod_list_layout)
-        
-        try:
-            for mod in mods:
-                self.create_mod_card(mod)
-            self.mod_list_layout.addStretch()
-            self.statusBar().showMessage(f"Found {len(mods)} mods", 3000)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to display mods: {str(e)}")
-
-    def create_mod_card(self, mod):
-        widget = QWidget()
-        widget.setFixedHeight(100)
-        
-        layout = QHBoxLayout(widget)
-        icon_label = QLabel()
-        icon_label.setFixedSize(80, 80)
-        icon_label.setStyleSheet("background-color: #353535;")
-        
-        text_layout = QVBoxLayout()
-        title = QLabel(f"<b>{mod.get('title', mod.get('name'))}</b>")
-        title.setStyleSheet("color: white; font-size: 14px;")
-        desc = QLabel(mod.get('description', 'No description'))
-        desc.setStyleSheet("color: #AAAAAA;")
-        
-        install_btn = QPushButton("Install")
-        install_btn.setStyleSheet("""
-            QPushButton { background: #505050; color: white; border: none; padding: 5px; }
-            QPushButton:hover { background: #606060; }
-        """)
-        install_btn.clicked.connect(lambda _, m=mod: self.install_mod(m))
-        
-        layout.addWidget(icon_label)
-        layout.addLayout(text_layout)
-        layout.addWidget(install_btn)
-        self.mod_list_layout.addWidget(widget)
-        
-        if mod.get('icon_url'):
-            self.load_item_icon(mod['id'], mod['icon_url'], icon_label)
-
-    def install_mod(self, mod):
-        if not self.current_server:
-            QMessageBox.warning(self, "Error", "Select a server first!")
-            return
-        
-        try:
-            platform = self.mods_platform_combo.currentText()
-            server_path = self.servers[self.current_server]['path']
-            mods_dir = os.path.join(server_path, "mods")
-            os.makedirs(mods_dir, exist_ok=True)
-            
-            if platform == "Modrinth":
-                version = mod['versions'][0]
-                file = version['files'][0]
-                url = file['url']
-                filename = file['filename']
-            elif platform == "CurseForge":
-                file = mod['versions'][0]
-                url = file['downloadUrl']
-                filename = file['fileName']
-            
-            dest_path = os.path.join(mods_dir, filename)
-            if os.path.exists(dest_path):
-                reply = QMessageBox.question(
-                    self, "File Exists", 
-                    f"{filename} already exists. Overwrite?",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply != QMessageBox.Yes:
-                    return
-            
-            self.download_file(url, dest_path)
-            QMessageBox.information(self, "Success", f"Installed {mod.get('title', mod.get('name'))}!")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Install failed: {str(e)}")
+            self.show_error(f"Search failed: {str(e)}")
 
     def safe_plugin_search(self):
-        """Handle plugin search with error checking"""
         platform = self.plugins_platform_combo.currentText()
         query = self.plugin_search.text()
         
@@ -967,51 +955,175 @@ class ServerManager(QMainWindow):
         try:
             if platform == "CurseForge":
                 if not self.api_keys.get('curseforge'):
-                    QMessageBox.warning(self, "Error", "CurseForge API key required!")
+                    self.show_error("CurseForge API key required!")
                     return
                 self.search_thread = CurseForgeSearchThread(query, 5, self.api_keys['curseforge'])
-                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_cf_plugins(data)))
+                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_curseforge_results(data)))
             elif platform == "Modrinth":
                 server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
-                self.search_thread = ModSearchThread(query, server_version, "plugins")
-                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_modrinth_plugins(data)))
+                self.search_thread = ModSearchThread(query, server_version, "bukkit")
+                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_modrinth_results(data)))
             
             self.search_thread.error.connect(self.show_search_error)
             self.search_thread.start()
         except Exception as e:
             self.progress.hide()
-            QMessageBox.critical(self, "Error", f"Search failed: {str(e)}")
-            self.statusBar().showMessage("Plugin search failed", 3000)
+            self.show_error(f"Search failed: {str(e)}")
 
-    def _format_cf_plugins(self, cf_plugins):
-        """Format CurseForge plugins for display"""
+    def _format_modrinth_results(self, results):
         return [{
-            'id': plugin['id'],
-            'name': plugin['name'],
-            'description': plugin.get('summary', 'No description'),
-            'icon_url': plugin['logo']['url'] if plugin.get('logo') else None,
-            'versions': plugin['latestFiles']
-        } for plugin in cf_plugins]
+            'id': res['project_id'],
+            'title': res['title'],
+            'description': res.get('description', 'No description'),
+            'icon_url': res.get('icon_url'),
+            'versions': res['versions']
+        } for res in results]
 
-    def _format_modrinth_plugins(self, modrinth_plugins):
-        """Format Modrinth plugins for display"""
+    def _format_curseforge_results(self, results):
         return [{
-            'id': plugin['project_id'],
-            'name': plugin['title'],
-            'description': plugin.get('description', 'No description'),
-            'icon_url': plugin.get('icon_url'),
-            'versions': plugin['versions']
-        } for plugin in modrinth_plugins]
+            'id': res['id'],
+            'name': res['name'],
+            'description': res.get('summary', 'No description'),
+            'icon_url': res['logo']['url'] if res.get('logo') else None,
+            'versions': res['latestFiles']
+        } for res in results]
 
-    def save_api_keys(self):
-        self.api_keys['curseforge'] = self.curseforge_key_input.text()
+    def show_mods(self, mods):
+        self.clear_layout(self.mod_list_layout)
+        for mod in mods:
+            self.create_resource_card(mod, self.mod_list_layout, self.install_mod)
+        self.mod_list_layout.addStretch()
+        self.statusBar().showMessage(f"Found {len(mods)} mods", 3000)
+
+    def show_plugins(self, plugins):
+        self.clear_layout(self.plugin_list_layout)
+        for plugin in plugins:
+            self.create_resource_card(plugin, self.plugin_list_layout, self.install_plugin)
+        self.plugin_list_layout.addStretch()
+        self.statusBar().show_message(f"Found {len(plugins)} plugins", 3000)
+
+    def create_resource_card(self, data, layout, install_handler):
+        widget = QWidget()
+        widget.setFixedHeight(100)
+        
+        hbox = QHBoxLayout(widget)
+        icon = QLabel()
+        icon.setFixedSize(80, 80)
+        
+        text = QVBoxLayout()
+        title = QLabel(f"<b>{data.get('title', data.get('name'))}</b>")
+        desc = QLabel(data.get('description', 'No description'))
+        text.addWidget(title)
+        text.addWidget(desc)
+        
+        btn = QPushButton("Install")
+        btn.clicked.connect(lambda _, d=data: install_handler(d))
+        
+        hbox.addWidget(icon)
+        hbox.addLayout(text)
+        hbox.addWidget(btn)
+        layout.addWidget(widget)
+        
+        if data.get('icon_url'):
+            self.load_item_icon(data['id'], data['icon_url'], icon)
+
+    def load_item_icon(self, item_id, url, target_label):
+        loader = ImageLoaderThread(url, item_id)
+        loader.loaded.connect(lambda i, p: self.update_icon(target_label, p))
+        loader.finished.connect(lambda: self.current_image_loaders.remove(loader))
+        self.current_image_loaders.append(loader)
+        loader.start()
+
+    def update_icon(self, label, pixmap):
+        label.setPixmap(pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def install_mod(self, mod):
+        self.install_resource(mod, "mods")
+
+    def install_plugin(self, plugin):
+        self.install_resource(plugin, "plugins")
+
+    def install_resource(self, resource, target_type):
+        if not self.current_server:
+            self.show_error("Select a server first!")
+            return
+        
         try:
-            with open(SETTINGS_FILE, 'w') as f:
-                json.dump(self.api_keys, f)
-            self.statusBar().showMessage("API keys saved", 3000)
+            server_path = self.servers[self.current_server]['path']
+            target_dir = os.path.join(server_path, target_type)
+            os.makedirs(target_dir, exist_ok=True)
+            
+            if self.mods_platform_combo.currentText() == "Modrinth":
+                version = resource['versions'][0]
+                file = version['files'][0]
+                url = file['url']
+                filename = file['filename']
+            else:
+                file = resource['versions'][0]
+                url = file['downloadUrl']
+                filename = file['fileName']
+            
+            dest_path = os.path.join(target_dir, filename)
+            if os.path.exists(dest_path):
+                reply = QMessageBox.question(
+                    self, "File Exists", 
+                    f"{filename} already exists. Overwrite?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            
+            self.download_file(url, dest_path)
+            self.show_info(f"Installed {filename}")
         except Exception as e:
-            logging.error(f"API key save failed: {str(e)}")
-            QMessageBox.critical(self, "Error", "Failed to save API keys")
+            self.show_error(f"Install failed: {str(e)}")
+
+    def clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if widget := item.widget():
+                widget.deleteLater()
+#endregion
+
+#region Utility Methods
+    def show_info(self, message):
+        QMessageBox.information(self, "Success", message)
+        self.statusBar().showMessage(message, 3000)
+
+    def show_error(self, message):
+        QMessageBox.critical(self, "Error", message)
+        self.statusBar().showMessage(f"Error: {message}", 5000)
+
+    def show_search_error(self, message):
+        self.progress.hide()
+        self.show_error(f"Search error: {message}")
+
+    def download_file(self, url, path):
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                for chunk in response.iter_content(chunk_size=8192):
+                    tmp.write(chunk)
+                os.replace(tmp.name, path)
+            return path
+        except Exception as e:
+            self.show_error(f"Download failed: {str(e)}")
+            raise
+
+    def cleanup_server_dir(self, path):
+        try:
+            if os.path.exists(path):
+                if platform.system() == "Windows":
+                    subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', path], check=True)
+                else:
+                    subprocess.run(["rm", "-rf", path], check=True)
+        except Exception as e:
+            self.show_error(f"Cleanup failed: {str(e)}")
+
+    def setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_file_view)
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.close)
 
     def closeEvent(self, event):
         for loader in self.current_image_loaders:
@@ -1020,6 +1132,7 @@ class ServerManager(QMainWindow):
         self.save_profiles()
         self.save_api_keys()
         event.accept()
+#endregion
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
