@@ -66,8 +66,11 @@ class SecureSettings:
             with open(Constants.SECURITY_KEY_FILE, 'rb') as f: key = f.read()
         return Fernet(key)
     
-    def encrypt(self, data): return self.cipher.encrypt(data.encode()).decode()
-    def decrypt(self, encrypted_data): return self.cipher.decrypt(encrypted_data.encode()).decode()
+    def encrypt(self, data):
+        return self.cipher.encrypt(data.encode()).decode()
+    
+    def decrypt(self, encrypted_data):
+        return self.cipher.decrypt(encrypted_data.encode()).decode()
 #endregion
 
 #region API Handlers
@@ -92,6 +95,7 @@ class ImageLoaderThread(QThread):
         super().__init__()
         self.url = url
         self.item_id = item_id
+    
     def run(self):
         try: 
             response = requests.get(self.url, timeout=10)
