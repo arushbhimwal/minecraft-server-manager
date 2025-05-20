@@ -26,8 +26,14 @@ from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QKeySequence, QShor
 from PySide6.QtCore import Qt, QThread, Signal, QDir, QStandardPaths
 import qdarktheme
 
+PROFILES_FILE = "profiles.json"
+SETTINGS_FILE = "settings.json"
+
 #region Constants
 class Constants:
+    HEADERS = {
+        "DEFAULT_USER_AGENT": "MinecraftServerManager/1.0 (+https://github.com/arushbhimwal/minecraft-server-manager)"
+    }
     SERVER_STATUS = {"STOPPED": "stopped", "RUNNING": "running", "STARTING": "starting"}
     FILE_PATHS = {"SERVER_JAR": "server.jar", "SERVER_PROPERTIES": "server.properties", "EULA_FILE": "eula.txt"}
     API_ENDPOINTS = {
@@ -96,7 +102,6 @@ class ImageLoaderThread(QThread):
             painter.end()
             self.loaded.emit(self.item_id, pixmap)
 
-#region Threads (continued)
 class ServerThread(QThread):
     output = Signal(str)
     stopped = Signal()
@@ -170,7 +175,7 @@ class ModSearchThread(QThread):
             if self.mc_version:
                 facets.append([f"versions:{self.mc_version}"])
 
-            headers = {'User-Agent': Constants.API_ENDPOINTS["DEFAULT_USER_AGENT"]}
+            headers = {'User-Agent': Constants.HEADERS["DEFAULT_USER_AGENT"]}
             response = requests.get(
                 f"https://api.modrinth.com/v2/search?query={self.query}&facets={json.dumps(facets)}",
                 headers=headers,
@@ -250,7 +255,7 @@ class UrlInstallThread(QThread):
         project_type = match.group(1)
         project_id = match.group(2)
         
-        headers = {'User-Agent': DEFAULT_USER_AGENT}
+        headers = {'User-Agent': Constants.HEADERS["DEFAULT_USER_AGENT"]}
         response = requests.get(
             f'https://api.modrinth.com/v2/project/{project_id}/version',
             headers=headers
@@ -655,6 +660,18 @@ class ServerManager(QMainWindow):
                     self.curseforge_key_input.setText(self.api_keys.get('curseforge', ''))
         except Exception as e:
             logging.error(f"Secure load failed: {str(e)}")
+    
+    def save_api_keys(self):
+        """Save API keys securely using encryption"""
+        try:
+            self.api_keys['curseforge'] = self.curseforge_key_input.text()
+            encrypted = self.secure_settings.encrypt(json.dumps(self.api_keys))
+            with open(SETTINGS_FILE, 'w') as f:
+                f.write(encrypted)
+            self.statusBar().showMessage("API keys saved", 3000)
+        except Exception as e:
+            logging.error(f"API key save failed: {str(e)}")
+            QMessageBox.critical(self, "Error", "Failed to save API keys")
 
 #region Server Operations
     def select_server_directory(self):
@@ -831,7 +848,7 @@ class ServerManager(QMainWindow):
             self.console_output.append(message)
             # Error detection
             if any(e in message for e in ["ERROR", "Exception", "Crash"]):
-                logger.error(f"Server Error: {message}")
+                logging.error(f"Server Error: {message}")
                 self.show_error_notification(message)
             
             # Line limit management
@@ -841,7 +858,7 @@ class ServerManager(QMainWindow):
                 cursor.select(cursor.LineUnderCursor)
                 cursor.removeSelectedText()
         except Exception as e:
-            logger.error(f"Output handling error: {str(e)}")
+            logging.error(f"Output handling error: {str(e)}")
 
     def handle_server_stop(self):
         if self.current_server:
