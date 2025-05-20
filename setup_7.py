@@ -26,20 +26,27 @@ from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QKeySequence, QShor
 from PySide6.QtCore import Qt, QThread, Signal, QDir, QStandardPaths
 import qdarktheme
 
-PROFILES_FILE = "profiles.json"
-SETTINGS_FILE = "settings.json"
-
 #region Constants
 class Constants:
     HEADERS = {
         "DEFAULT_USER_AGENT": "MinecraftServerManager/1.0 (+https://github.com/arushbhimwal/minecraft-server-manager)"
-    }
-    SERVER_STATUS = {"STOPPED": "stopped", "RUNNING": "running", "STARTING": "starting"}
-    FILE_PATHS = {"SERVER_JAR": "server.jar", "SERVER_PROPERTIES": "server.properties", "EULA_FILE": "eula.txt"}
+        }
+    SERVER_STATUS = {
+        "STOPPED": "stopped", "RUNNING": "running", "STARTING": "starting"
+        }
+    FILES = {
+        "PROFILES": "profiles.json",
+        "SETTINGS": "settings.json",
+        "SERVER_JAR": "server.jar",
+        "SERVER_PROPERTIES": "server.properties",
+        "EULA_FILE": "eula.txt"
+        }
     API_ENDPOINTS = {
+        "VANILLA_MANIFEST": "https://piston-meta.mojang.com/mc/game/version_manifest.json",
+        "PAPER_VERSIONS": "https://api.papermc.io/v2/projects/paper",
         "MODRINTH_VERSIONS": "https://api.modrinth.com/v2/tag/game_version",
-        "PAPER_VERSIONS": "https://api.papermc.io/v2/projects/paper"
-    }
+        "FABRIC_VERSIONS": "https://meta.fabricmc.net/v2/versions/game"
+        }
     MAX_CONSOLE_LINES = 1000
     RCON_TIMEOUT = 5
     BACKUP_DIR = "backups"
@@ -615,6 +622,28 @@ class ServerManager(QMainWindow):
 #endregion
 
 #region Core Functionality
+    def check_java(self):
+        """Check system for Java installation and populate versions"""
+        try:
+            result = subprocess.run(
+                ['java', '-version'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            version_info = result.stderr.splitlines()[0]
+            detected_version = version_info.split()[2].strip('\"').split('.')[0]
+            
+            if detected_version in self.java_versions:
+                self.java_combo.setCurrentText(detected_version)
+            else:
+                self.show_error(f"Unsupported Java version: {detected_version}")
+                self.java_combo.setCurrentIndex(0)
+                
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            self.show_error("Java runtime not found! Install Java 8+ first.")
+            self.java_combo.setEnabled(False)
+
     def refresh_file_view(self):
         if self.current_server:
             self.file_view.setRootIndex(self.file_model.index(
@@ -633,8 +662,8 @@ class ServerManager(QMainWindow):
 
     def load_profiles(self):
         try:
-            if os.path.exists(Constants.FILE_PATHS["PROFILES_FILE"]):
-                with open(Constants.FILE_PATHS["PROFILES_FILE"], 'r') as f:
+            if os.path.exists(Constants.FILES["PROFILES"]):
+                with open(Constants.FILES["PROFILES"], 'r') as f:
                     self.servers = json.load(f)
                     for server in self.servers.values():
                         server['thread'] = None
@@ -644,7 +673,7 @@ class ServerManager(QMainWindow):
 
     def save_profiles(self):
         try:
-            with open(Constants.FILE_PATHS["PROFILES_FILE"], 'w') as f:
+            with open(Constants.FILES["PROFILES"], 'w') as f:
                 save_data = {name: {k:v for k,v in data.items() if k != 'thread'} 
                            for name, data in self.servers.items()}
                 json.dump(save_data, f, indent=2)
@@ -653,8 +682,8 @@ class ServerManager(QMainWindow):
 
     def check_api_keys(self):
         try:
-            if os.path.exists(Constants.FILE_PATHS["SETTINGS_FILE"]):
-                with open(Constants.FILE_PATHS["SETTINGS_FILE"], 'r') as f:
+            if os.path.exists(Constants.FILES["SETTINGS"]):
+                with open(Constants.FILES["SETTINGS"], 'r') as f:
                     encrypted = f.read()
                     self.api_keys = json.loads(self.secure_settings.decrypt(encrypted))
                     self.curseforge_key_input.setText(self.api_keys.get('curseforge', ''))
@@ -666,7 +695,7 @@ class ServerManager(QMainWindow):
         try:
             self.api_keys['curseforge'] = self.curseforge_key_input.text()
             encrypted = self.secure_settings.encrypt(json.dumps(self.api_keys))
-            with open(SETTINGS_FILE, 'w') as f:
+            with open(Constants.FILES["SETTINGS"], 'w') as f:
                 f.write(encrypted)
             self.statusBar().showMessage("API keys saved", 3000)
         except Exception as e:
@@ -710,7 +739,7 @@ class ServerManager(QMainWindow):
             }
             
             # Download server jar
-            jar_path = os.path.join(server_dir, Constants.FILE_PATHS["SERVER_JAR"])
+            jar_path = os.path.join(server_dir, Constants.FILES["SERVER_JAR"])
             if loader == "Vanilla":
                 self.download_file(self.get_vanilla_url(version), jar_path)
             elif loader == "Paper":
@@ -728,29 +757,36 @@ class ServerManager(QMainWindow):
             self.cleanup_server_dir(server_dir)
 
     def create_eula_file(self, path):
-        with open(os.path.join(path, Constants.FILE_PATHS["EULA_FILE"]), 'w') as f:
+        with open(os.path.join(path, Constants.FILES["EULA_FILE"]), 'w') as f:
             f.write("eula=true\n")
 
     def update_versions(self, loader_name):
         self.version_combo.clear()
         self.progress.show()
         self.statusBar().showMessage("Fetching versions...")
-        
+
         try:
             if loader_name == "Vanilla":
                 response = requests.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"], timeout=10)
                 versions = [v['id'] for v in response.json()['versions'] if v['type'] == 'release']
             elif loader_name == "Paper":
+                # First get available Paper versions
                 response = requests.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"], timeout=10)
-                versions = response.json()['versions'][::-1]
+                paper_versions = response.json().get('versions', [])
+                versions = [v for v in reversed(paper_versions) if re.match(r'^\d+\.\d+\.\d+$', v)]
+
+                if not versions:
+                    raise ValueError("No valid Paper versions found")
             else:
                 versions = ["Version selection not implemented"]
-            
-            self.version_combo.addItems(versions)
+
+            self.version_combo.addItems(versions[:20])  # Show latest 20
             self.progress.hide()
             self.statusBar().showMessage("Versions loaded", 3000)
         except Exception as e:
+            self.progress.hide()
             self.show_error(f"Version fetch failed: {str(e)}")
+            self.statusBar().showMessage("Version fetch failed", 3000)
 
     def get_vanilla_url(self, version):
         manifest = requests.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"]).json()
@@ -761,12 +797,38 @@ class ServerManager(QMainWindow):
         raise ValueError("Version not found")
 
     def get_paper_url(self, version):
-        builds = requests.get(f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/{version}").json()
-        if not builds['builds']:
-            raise ValueError("No builds found")
-        latest = builds['builds'][-1]
-        return f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/{version}/builds/{latest}/downloads/paper-{version}-{latest}.jar"
+        """Get PaperMC server download URL with proper version validation"""
+        try:
+            # Verify version exists
+            versions_response = requests.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"])
+            available_versions = versions_response.json().get('versions', [])
 
+            if version not in available_versions:
+                raise ValueError(f"PaperMC version {version} not available")
+
+            # Get builds for valid version
+            builds_url = f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/{version}/builds"
+            response = requests.get(builds_url)
+            response.raise_for_status()
+
+            builds_data = response.json()
+            if not builds_data.get('builds'):
+                raise ValueError(f"No builds available for PaperMC {version}")
+
+            # Get latest build
+            latest_build = max(builds_data['builds'], key=lambda x: x['build'])
+            build_number = latest_build['build']
+            jar_name = f"paper-{version}-{build_number}.jar"
+
+            return f"{builds_url}/{build_number}/downloads/{jar_name}"
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                raise ValueError(f"PaperMC version {version} not found")
+            raise
+        except Exception as e:
+            raise ValueError(f"Failed to get PaperMC URL: {str(e)}")
+        
     def update_server_list(self):
         self.server_list.clear()
         for server_name in self.servers:
@@ -801,7 +863,7 @@ class ServerManager(QMainWindow):
         
         try:
             server = self.servers[self.current_server]
-            props_path = os.path.join(server['path'], Constants.FILE_PATHS["SERVER_PROPERTIES"])
+            props_path = os.path.join(server['path'], Constants.FILES["SERVER_PROPERTIES"])
             
             with open(props_path, 'r') as f:
                 config = {line.split('=')[0]: line.split('=')[1].strip() 
@@ -828,7 +890,7 @@ class ServerManager(QMainWindow):
                     java_path,
                     f"-Xmx{server.get('max_ram', '2G')}",
                     "-jar",
-                    Constants.FILE_PATHS["SERVER_JAR"],
+                    Constants.FILES["SERVER_JAR"],
                     "nogui"
                 ]
                 
