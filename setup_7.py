@@ -7,6 +7,7 @@ import subprocess
 import requests
 import logging
 import re
+import time
 import random
 import tempfile
 import zipfile
@@ -301,17 +302,63 @@ class UrlInstallThread(QThread):
         return self.download_file(download_url, self.get_save_path(file_data['fileName']))
 
     def download_file(self, url, path):
+        max_retries = 3
+        retry_delay = 1  # seconds
+        temp_file = None
+
         try:
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-                os.replace(tmp.name, path)
-            return path
-        except Exception as e:
-            logging.error(f"Download failed: {str(e)}")
-            raise
+            for attempt in range(max_retries):
+                try:
+                    # Create temp file in the same directory to avoid cross-device issues
+                    temp_dir = os.path.dirname(path)
+                    temp_file = tempfile.NamedTemporaryFile(
+                        dir=temp_dir,
+                        delete=False,
+                        prefix="mc_temp_",
+                        suffix=".download"
+                    )
+
+                    print(f"[DEBUG] Downloading {url} to temp file: {temp_file.name}")
+
+                    # Stream download
+                    response = requests.get(url, stream=True, timeout=30)
+                    response.raise_for_status()
+
+                    # Write content
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:  # filter out keep-alive chunks
+                            temp_file.write(chunk)
+
+                    # Close before move to release file handle
+                    temp_file.close()
+                    print(f"[DEBUG] Temp file closed. Moving {temp_file.name} -> {path}")
+
+                    # Atomic replace (works across volumes on Windows)
+                    os.replace(temp_file.name, path)
+                    print("[DEBUG] File move successful")
+                    return path
+
+                except PermissionError as e:
+                    print(f"[ERROR] File access error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    if attempt < max_retries - 1:
+                        # Cleanup and retry
+                        if temp_file and not temp_file.closed:
+                            temp_file.close()
+                        if os.path.exists(temp_file.name):
+                            os.unlink(temp_file.name)
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                    raise
+
+        finally:
+            # Final cleanup if still exists
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                except Exception as cleanup_error:
+                    print(f"[WARNING] Temp file cleanup failed: {str(cleanup_error)}")
+
+        return None
 
     def get_save_path(self, filename):
         save_dir = os.path.join(self.server_path, self.target_folder)
@@ -774,19 +821,30 @@ class ServerManager(QMainWindow):
                 response = requests.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"], timeout=10)
                 versions = [v['id'] for v in response.json()['versions'] if v['type'] == 'release']
             elif loader_name == "Paper":
-                # First get available Paper versions
+                # Get available Paper versions from API
                 response = requests.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"], timeout=10)
-                paper_versions = response.json().get('versions', [])
-                versions = [v for v in reversed(paper_versions) if re.match(r'^\d+\.\d+\.\d+$', v)]
+                paper_data = response.json()
 
-                if not versions:
-                    raise ValueError("No valid Paper versions found")
+                if 'versions' not in paper_data:
+                    raise ValueError("Invalid PaperMC API response")
+
+                # Filter valid versions (e.g., "1.20.4" but not "1.20.4-R0.1-SNAPSHOT")
+                valid_versions = [
+                    v for v in reversed(paper_data['versions'])
+                    if re.match(r'^\d+\.\d+\.\d+$', v)  # Only X.X.X format
+                ]
+
+                if not valid_versions:
+                    raise ValueError("No stable Paper versions available")
+
+                versions = valid_versions
             else:
                 versions = ["Version selection not implemented"]
 
-            self.version_combo.addItems(versions[:20])  # Show latest 20
+            self.version_combo.addItems(versions)
             self.progress.hide()
-            self.statusBar().showMessage("Versions loaded", 3000)
+            self.statusBar().showMessage(f"Loaded {len(versions)} versions", 3000)
+
         except Exception as e:
             self.progress.hide()
             self.show_error(f"Version fetch failed: {str(e)}")
@@ -801,38 +859,70 @@ class ServerManager(QMainWindow):
         raise ValueError("Version not found")
 
     def get_paper_url(self, version):
-        """Get PaperMC server download URL with proper version validation"""
+        """Get PaperMC download URL with debug logging"""
         try:
-            # Verify version exists
-            versions_response = requests.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"])
-            available_versions = versions_response.json().get('versions', [])
-
-            if version not in available_versions:
-                raise ValueError(f"PaperMC version {version} not available")
-
-            # Get builds for valid version
-            builds_url = f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/{version}/builds"
-            response = requests.get(builds_url)
+            # ------------------------------------------------------------------
+            # Step 1: Get build list
+            # ------------------------------------------------------------------
+            builds_url = f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/versions/{version}/builds"
+            print(f"[DEBUG] Fetching builds from: {builds_url}")
+            
+            response = requests.get(builds_url, timeout=10)
             response.raise_for_status()
-
             builds_data = response.json()
+            
+            print(f"[DEBUG] Received {len(builds_data.get('builds', []))} builds for version {version}")
+    
+            # ------------------------------------------------------------------
+            # Step 2: Validate builds
+            # ------------------------------------------------------------------
             if not builds_data.get('builds'):
+                print(f"[ERROR] No builds found in response for version {version}")
                 raise ValueError(f"No builds available for PaperMC {version}")
-
-            # Get latest build
-            latest_build = max(builds_data['builds'], key=lambda x: x['build'])
+    
+            # ------------------------------------------------------------------
+            # Step 3: Extract build details
+            # ------------------------------------------------------------------
+            latest_build = builds_data['builds'][-1]
+            print(f"[DEBUG] Latest build details: {json.dumps(latest_build, indent=2)}")
+    
             build_number = latest_build['build']
-            jar_name = f"paper-{version}-{build_number}.jar"
-
-            return f"{builds_url}/{build_number}/downloads/{jar_name}"
-
+            downloads_data = latest_build['downloads']['application']
+            filename = downloads_data['name']
+            
+            print(f"[DEBUG] Extracted values:")
+            print(f"  - Version:    {version}")
+            print(f"  - Build:      {build_number}")
+            print(f"  - File name:  {filename}")
+    
+            # ------------------------------------------------------------------
+            # Step 4: Construct final URL
+            # ------------------------------------------------------------------
+            download_url = (
+                f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/"
+                f"versions/{version}/"
+                f"builds/{build_number}/"
+                f"downloads/{filename}"
+            )
+            print(f"[DEBUG] Constructed download URL: {download_url}")
+            
+            return download_url
+    
         except requests.exceptions.HTTPError as e:
+            print(f"[HTTP ERROR] Status: {e.response.status_code}")
+            print(f"[HTTP ERROR] URL: {e.response.url}")
             if e.response.status_code == 404:
                 raise ValueError(f"PaperMC version {version} not found")
-            raise
-        except Exception as e:
-            raise ValueError(f"Failed to get PaperMC URL: {str(e)}")
-        
+            raise ValueError(f"API request failed: {str(e)}")
+        except KeyError as e:
+            print(f"[KEY ERROR] Missing field in API response: {str(e)}")
+            print(f"[KEY ERROR] Response data: {json.dumps(builds_data, indent=2)}")
+            raise ValueError(f"Missing required field in API response: {str(e)}")
+        except json.JSONDecodeError:
+            print(f"[JSON ERROR] Invalid response from: {builds_url}")
+            print(f"[JSON ERROR] Response text: {response.text[:200]}...")
+            raise ValueError("Invalid JSON response from PaperMC API")
+
     def update_server_list(self):
         self.server_list.clear()
         for server_name in self.servers:
