@@ -13,14 +13,10 @@ import logging
 import re
 import zipfile
 import secrets
-import stat
-import hashlib
 from datetime import datetime
 from functools import lru_cache
-from collections import deque
 from cryptography.fernet import Fernet
 from mcrcon import MCRcon
-from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -30,7 +26,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QFormLayout
 )
 from PySide6.QtGui import QPixmap, QImage, QColor, QKeySequence, QShortcut
-from PySide6.QtCore import Qt, QThread, Signal, QDir, QRunnable, QThreadPool
+from PySide6.QtCore import Qt, QThread, Signal, QDir, QTimer
 import qdarktheme
 
 # Constants
@@ -41,8 +37,8 @@ class Constants:
     SERVER_STATUS = {
         "STOPPED": "stopped", 
         "RUNNING": "running", 
-        "STARTING": "starting",  # Add starting state
-        "STOPPING": "stopping"   # Add stopping state
+        "STARTING": "starting",
+        "STOPPING": "stopping"
     }
     FILES = {
         "PROFILES": "profiles.json",
@@ -71,7 +67,7 @@ class SecureSettings:
             key = Fernet.generate_key()
             with open(Constants.SECURITY_KEY_FILE, 'wb') as f: 
                 f.write(key)
-            # Set restrictive permissions (owner read/write only)
+            # Set secure permissions on non-Windows systems
             if platform.system() != 'Windows':
                 os.chmod(Constants.SECURITY_KEY_FILE, 0o600)
         else:
@@ -99,13 +95,6 @@ class FileDownloader:
         target_dir = os.path.dirname(path)
         os.makedirs(target_dir, exist_ok=True)
         
-        # Use curl if available, otherwise fallback to requests
-        if shutil.which("curl"):
-            return self._download_with_curl(url, path)
-        else:
-            return self._download_with_requests(url, path)
-    
-    def _download_with_curl(self, url, path):
         curl_cmd = [
             "curl",
             "-L",  # Follow redirects
@@ -122,6 +111,10 @@ class FileDownloader:
         
         for attempt in range(self.max_retries):
             try:
+                print(f"Download attempt {attempt+1}/{self.max_retries}")
+                print(f"  URL: {url}")
+                print(f"  Target: {path}")
+                
                 # Run curl command
                 result = subprocess.run(
                     curl_cmd,
@@ -167,87 +160,42 @@ class FileDownloader:
                         f"actual size {actual_size}"
                     )
                 
+                print(f"Download successful! Size: {actual_size} bytes")
                 return path
                 
             except (subprocess.CalledProcessError, ValueError, OSError) as e:
-                error_msg = f"Download error (curl): {str(e)}"
+                error_msg = f"Download error: {str(e)}"
+                print(error_msg)
                 
                 # Clean up partial download
                 if os.path.exists(path):
                     try:
                         os.remove(path)
-                    except OSError:
-                        pass
+                        print(f"Removed partial file: {path}")
+                    except OSError as remove_error:
+                        print(f"Failed to remove partial file: {str(remove_error)}")
                 
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay_base * (2 ** attempt)
+                    print(f"Retrying in {delay:.1f} seconds...")
                     time.sleep(delay)
                 else:
-                    # Fallback to requests after curl failures
-                    return self._download_with_requests(url, path)
-    
-    def _download_with_requests(self, url, path):
-        for attempt in range(self.max_retries):
-            try:
-                with requests.get(url, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    
-                    # Create temporary file with secure permissions
-                    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                        # Download content
-                        for chunk in r.iter_content(chunk_size=8192):
-                            if chunk:  # filter out keep-alive chunks
-                                tmp.write(chunk)
-                        
-                        # Set secure permissions
-                        if platform.system() != 'Windows':
-                            os.chmod(tmp.name, 0o600)
-                        
-                        # Move to final location
-                        os.replace(tmp.name, path)
-                    
-                    # Verify file
-                    if not os.path.exists(path):
-                        raise FileNotFoundError(f"File not created at {path}")
-                    
-                    return path
-                    
-            except Exception as e:
-                error_msg = f"Download error (requests): {str(e)}"
-                
-                # Clean up partial download
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-                
-                if attempt < self.max_retries - 1:
-                    delay = self.retry_delay_base * (2 ** attempt)
-                    time.sleep(delay)
-                else:
-                    raise RuntimeError(f"Download failed after {self.max_retries} attempts: {error_msg}")
+                    final_error = f"Download failed after {self.max_retries} attempts: {str(e)}"
+                    print(final_error)
+                    raise RuntimeError(final_error) from e
 
 class BackupManager:
     """Handles server backups"""
     
     def __init__(self, server_path):
         self.server_path = server_path
+        self.backup_dir = os.path.join(server_path, Constants.BACKUP_DIR)
         
     def create_backup(self):
         """Create a zip backup of the server"""
-        # Let user choose backup location
-        backup_dir = QFileDialog.getExistingDirectory(
-            None, "Select Backup Location", 
-            os.path.expanduser("~"),
-            QFileDialog.ShowDirsOnly
-        )
-        
-        if not backup_dir:
-            return None
-            
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = os.path.join(backup_dir, f"backup-{timestamp}.zip")
+        backup_path = os.path.join(self.backup_dir, f"backup-{timestamp}.zip")
+        os.makedirs(self.backup_dir, exist_ok=True)
         
         try:
             with zipfile.ZipFile(backup_path, 'w') as zipf:
@@ -284,31 +232,6 @@ class CurseForgeAPI:
             headers=headers
         )
         return response.json()
-
-class ImageLoader(QRunnable):
-    """Runnable for loading item icons"""
-    loaded = Signal(str, QPixmap)  # (item_id, pixmap)
-
-    def __init__(self, url, item_id):
-        super().__init__()
-        self.url = url
-        self.item_id = item_id
-        self.is_cancelled = False
-
-    def run(self):
-        if self.is_cancelled:
-            return
-            
-        try:
-            response = requests.get(self.url, timeout=10)
-            img = QImage.fromData(response.content)
-            pixmap = QPixmap.fromImage(img)
-            self.loaded.emit(self.item_id, pixmap)
-        except Exception:
-            # Create a placeholder pixmap
-            pixmap = QPixmap(80, 80)
-            pixmap.fill(QColor(200, 200, 200))
-            self.loaded.emit(self.item_id, pixmap)
 
 class ModSearchThread(QThread):
     """Thread for searching mods on Modrinth"""
@@ -403,6 +326,30 @@ class CurseForgeSearchThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+class ImageLoaderThread(QThread):
+    """Thread for loading item icons"""
+    loaded = Signal(str, QPixmap)  # (item_id, pixmap)
+    finished = Signal()
+
+    def __init__(self, url, item_id):
+        super().__init__()
+        self.url = url
+        self.item_id = item_id
+
+    def run(self):
+        try:
+            response = requests.get(self.url, timeout=10)
+            img = QImage.fromData(response.content)
+            pixmap = QPixmap.fromImage(img)
+            self.loaded.emit(self.item_id, pixmap)
+        except Exception:
+            # Create a placeholder pixmap
+            pixmap = QPixmap(80, 80)
+            pixmap.fill(QColor(200, 200, 200))
+            self.loaded.emit(self.item_id, pixmap)
+        finally:
+            self.finished.emit()
+
 class UrlInstallThread(QThread):
     """Thread for installing mods/plugins from URLs"""
     progress = Signal(int, str)  # (progress_value, status_message)
@@ -416,34 +363,20 @@ class UrlInstallThread(QThread):
         self.api_key = api_key
         self.target_type = target_type  # "mods" or "plugins"
         self.downloader = FileDownloader()
-        self.url_regex = re.compile(
-            r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*'
-        )
 
     def run(self):
         try:
-            # Validate URLs
-            valid_urls = []
-            for url in self.urls:
-                if not url.strip():
-                    continue
-                if self.url_regex.match(url):
-                    valid_urls.append(url)
-                else:
-                    self.error.emit(f"Invalid URL skipped: {url}")
-            
-            total = len(valid_urls)
-            if total == 0:
-                self.error.emit("No valid URLs found")
-                return
-                
+            total = len(self.urls)
             success = 0
             target_dir = os.path.join(self.server_path, self.target_type)
             
             # Create directory if needed
             os.makedirs(target_dir, exist_ok=True)
             
-            for i, url in enumerate(valid_urls):
+            for i, url in enumerate(self.urls):
+                if not url.strip():
+                    continue
+                    
                 self.progress.emit(int(100 * i / total), f"Processing URL {i+1}/{total}")
                 
                 try:
@@ -559,11 +492,11 @@ class ServerThread(QThread):
         if self.process:
             try:
                 self.process.terminate()
-                self.process.wait(5000)
+                self.process.wait(5)  # Wait 5 seconds for clean shutdown
                 if self.process.poll() is None:
                     self.process.kill()
             except Exception as e:
-                logging.error(f"Error stopping process: {str(e)}")
+                self.error.emit(f"Error stopping process: {str(e)}")
 
 class ServerManager(QMainWindow):
     def __init__(self):
@@ -572,15 +505,10 @@ class ServerManager(QMainWindow):
         self.loaders = ['Vanilla', 'Paper', 'Spigot', 'Forge', 'Fabric', 'Quilt', 'Mohist']
         self.servers = {}
         self.current_server = None
+        self.current_image_loaders = []
         self.api_keys = {'curseforge': ''}
         self.secure_settings = SecureSettings()
-        self.console_buffer = deque(maxlen=Constants.MAX_CONSOLE_LINES)
-        self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(4)
-        self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self.update_server_status)
-        self.status_timer.start(2000)  # Check every 2 seconds
-
+        
         # Initialize UI and components
         self.init_ui()
         self.load_profiles()
@@ -589,54 +517,11 @@ class ServerManager(QMainWindow):
         self.setup_logging()
         self.setStyleSheet(self.get_style_sheet())
         self.statusBar().showMessage("Ready")
-
-    def update_server_status(self):
-        """Check actual server process status"""
-        if not self.current_server:
-            return
-            
-        server = self.servers[self.current_server]
-        path = server['path']
         
-        # Check if server process is actually running
-        if server['status'] == Constants.SERVER_STATUS["STARTING"]:
-            if self.is_server_process_running(path):
-                server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                self.update_server_list()
-                self.statusBar().showMessage("Server is running", 3000)
-            else:
-                # Show starting status in status bar
-                self.statusBar().showMessage("Server starting...")
-                
-        # Update status if server stopped unexpectedly
-        elif server['status'] == Constants.SERVER_STATUS["RUNNING"]:
-            if not self.is_server_process_running(path):
-                server['status'] = Constants.SERVER_STATUS["STOPPED"]
-                self.update_server_list()
-                self.statusBar().showMessage("Server stopped unexpectedly", 5000)
-
-    def is_server_process_running(self, server_path):
-        """Check if server process is actually running"""
-        try:
-            jar_path = os.path.join(server_path, Constants.FILES["SERVER_JAR"])
-            
-            if platform.system() == "Windows":
-                result = subprocess.run(
-                    ['wmic', 'process', 'where', f'commandline like "%{jar_path}%"', 'get', 'processid'],
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                return "ProcessId" in result.stdout
-            else:
-                result = subprocess.run(
-                    ['pgrep', '-f', jar_path],
-                    capture_output=True,
-                    text=True
-                )
-                return result.returncode == 0
-        except Exception:
-            return False
+        # Server status monitoring timer
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self.update_server_status)
+        self.status_timer.start(2000)  # Check every 2 seconds
 
     def setup_logging(self):
         logging.basicConfig(
@@ -770,8 +655,7 @@ class ServerManager(QMainWindow):
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.command_input = QLineEdit()
-        # Changed from send_command to on_command_enter
-        self.command_input.returnPressed.connect(self.on_command_enter)
+        self.command_input.returnPressed.connect(self.send_command)
         layout.addWidget(self.console_output)
         layout.addWidget(self.command_input)
 
@@ -932,7 +816,7 @@ class ServerManager(QMainWindow):
                     for server in self.servers.values():
                         server['thread'] = None
                         # Reset status to STOPPED on app start
-                        server['status'] = Constants.SERVER_STATUS["STOPPED"] 
+                        server['status'] = Constants.SERVER_STATUS["STOPPED"]
                     self.update_server_list()
         except Exception as e:
             self.show_error(f"Failed to load profiles: {str(e)}")
@@ -984,6 +868,19 @@ class ServerManager(QMainWindow):
         self.progress.hide()
         self.show_error(f"Search error: {message}")
 
+    def download_file(self, url, path):
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                for chunk in response.iter_content(chunk_size=8192):
+                    tmp.write(chunk)
+                os.replace(tmp.name, path)
+            return path
+        except Exception as e:
+            self.show_error(f"Download failed: {str(e)}")
+            raise
+
     def cleanup_server_dir(self, path):
         try:
             if os.path.exists(path):
@@ -995,10 +892,17 @@ class ServerManager(QMainWindow):
             self.show_error(f"Cleanup failed: {str(e)}")
 
     def closeEvent(self, event):
-        self.thread_pool.waitForDone(3000)
+        # Stop any running image loaders
+        for loader in self.current_image_loaders:
+            if loader.isRunning():
+                loader.quit()
+                
+        # Stop the server status monitor
+        self.status_timer.stop()
+        
+        # Save data
         self.save_profiles()
         self.save_api_keys()
-        self.status_timer.stop()
         event.accept()
 
     def select_server_directory(self):
@@ -1040,21 +944,21 @@ class ServerManager(QMainWindow):
             else:
                 raise ValueError("Unsupported loader")
 
-            # Create server configuration files
-            self.create_server_properties(server_dir)
-            self.create_eula_file(server_dir)
-
             # Generate secure RCON password
             rcon_password = secrets.token_urlsafe(16)
-            
-            # Save server profile
+
+            # Create server configuration files WITH PASSWORD
+            self.create_server_properties(server_dir, rcon_password)  # Pass password here
+            self.create_eula_file(server_dir)
+
+            # Save server profile with encrypted password
             self.servers[name] = {
                 "path": server_dir,
                 "status": Constants.SERVER_STATUS["STOPPED"],
                 "max_ram": "2G",
                 "mc_version": version,
-                "thread": None,
-                "rcon_password": self.secure_settings.encrypt(rcon_password)
+                "rcon_password": self.secure_settings.encrypt(rcon_password),
+                "thread": None
             }
             self.save_profiles()
             self.update_server_list()
@@ -1205,6 +1109,76 @@ class ServerManager(QMainWindow):
         self.file_model.setRootPath(server_data['path'])
         self.file_view.setRootIndex(self.file_model.index(server_data['path']))
 
+    def send_command(self):
+        cmd = self.command_input.text()
+        self.command_input.clear()
+        if not self.current_server or not cmd:
+            return
+
+        try:
+            server = self.servers[self.current_server]
+
+            # Decrypt RCON password
+            rcon_password = self.secure_settings.decrypt(server['rcon_password'])
+
+            # Use standard RCON port 25575
+            with MCRcon("localhost", rcon_password, 25575, 
+                      timeout=Constants.RCON_TIMEOUT) as mcr:
+                response = mcr.command(cmd)
+                self.console_output.append(f"> {cmd}\n{response}")
+        except ConnectionRefusedError:
+            self.show_error("RCON connection refused - check if server is running")
+        except Exception as e:
+            self.show_error(f"Command failed: {str(e)}")
+
+    def update_server_status(self):
+        """Check actual server process status and update UI"""
+        if not self.current_server:
+            return
+            
+        server = self.servers[self.current_server]
+        path = server['path']
+        
+        # Check if server process is actually running
+        if server.get('status') == Constants.SERVER_STATUS["STARTING"]:
+            if self.is_server_process_running(path):
+                server['status'] = Constants.SERVER_STATUS["RUNNING"]
+                self.update_server_list()
+                self.statusBar().showMessage("Server is running", 3000)
+            else:
+                # Show persistent starting status in status bar
+                self.statusBar().showMessage("Server starting...")
+                
+        # Update status if server stopped unexpectedly
+        elif server.get('status') == Constants.SERVER_STATUS["RUNNING"]:
+            if not self.is_server_process_running(path):
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.update_server_list()
+                self.statusBar().showMessage("Server stopped unexpectedly", 5000)
+
+    def is_server_process_running(self, server_path):
+        """Check if server process is actually running"""
+        try:
+            jar_path = os.path.join(server_path, Constants.FILES["SERVER_JAR"])
+            
+            if platform.system() == "Windows":
+                result = subprocess.run(
+                    ['wmic', 'process', 'where', f'commandline like "%{jar_path}%"', 'get', 'processid'],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                return "ProcessId" in result.stdout
+            else:
+                result = subprocess.run(
+                    ['pgrep', '-f', jar_path],
+                    capture_output=True,
+                    text=True
+                )
+                return result.returncode == 0
+        except Exception:
+            return False
+
     def start_server(self):
         if not self.current_server:
             return
@@ -1226,10 +1200,6 @@ class ServerManager(QMainWindow):
                 server['thread'].stopped.connect(self.handle_server_stop)
                 server['thread'].error.connect(self.handle_thread_error)
                 server['thread'].start()
-                server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                self.save_profiles()
-                self.update_server_list()
-                self.statusBar().showMessage("Server starting...", 3000)
                 
                 # Update status to STARTING
                 server['status'] = Constants.SERVER_STATUS["STARTING"]
@@ -1245,16 +1215,27 @@ class ServerManager(QMainWindow):
 
     def handle_server_output(self, message):
         try:
-            # Add to circular buffer
-            self.console_buffer.append(message)
-            # Update console with full buffer content
-            self.console_output.setText("\n".join(self.console_buffer))
-            
+            self.console_output.append(message)
             # Error detection
             if any(e in message for e in ["ERROR", "Exception", "Crash"]):
                 logging.error(f"Server Error: {message}")
+            
+            # Line limit management
+            if self.console_output.document().lineCount() > Constants.MAX_CONSOLE_LINES:
+                cursor = self.console_output.textCursor()
+                cursor.movePosition(cursor.Start)
+                cursor.select(cursor.LineUnderCursor)
+                cursor.removeSelectedText()
         except Exception as e:
             logging.error(f"Output handling error: {str(e)}")
+
+    def handle_thread_error(self, message):
+        """Handle errors from server thread"""
+        if self.current_server:
+            server = self.servers[self.current_server]
+            server['status'] = Constants.SERVER_STATUS["STOPPED"]
+            self.update_server_list()
+            self.show_error(f"Server error: {message}")
 
     def handle_server_stop(self):
         if self.current_server:
@@ -1265,135 +1246,49 @@ class ServerManager(QMainWindow):
             self.update_server_list()
             self.statusBar().showMessage("Server stopped", 3000)
 
-    def handle_thread_error(self, error):
-        self.show_error(f"Server error: {error}")
-
     def stop_server(self):
         if self.current_server and self.servers[self.current_server]['status'] in [
             Constants.SERVER_STATUS["RUNNING"], 
             Constants.SERVER_STATUS["STARTING"]
         ]:
             try:
-                # Use send_rcon_command instead of send_command
-                self.send_rcon_command("stop")
+                self.send_command("stop")
                 self.servers[self.current_server]['thread'].stop()
-                self.servers[self.current_server]['status'] = Constants.SERVER_STATUS["STOPPING"]
-                self.save_profiles()
-                self.update_server_list()
-                self.statusBar().showMessage("Stopping server...", 3000)
                 
                 # Update status to STOPPING
+                server = self.servers[self.current_server]
                 server['status'] = Constants.SERVER_STATUS["STOPPING"]
                 self.save_profiles()
                 self.update_server_list()
-                self.statusBar().showMessage("Stopping server...")
                 
+                self.statusBar().showMessage("Stopping server...")
             except Exception as e:
                 self.show_error(f"Stop failed: {str(e)}")
-
-    def send_rcon_command(self, cmd):
-        """Send RCON command directly"""
-        if not self.current_server or not cmd:
-            return
-        
-        try:
-            server = self.servers[self.current_server]
-            props_path = os.path.join(server['path'], Constants.FILES["SERVER_PROPERTIES"])
-            
-            with open(props_path, 'r') as f:
-                config = {line.split('=')[0]: line.split('=')[1].strip() 
-                        for line in f if '=' in line}
-            
-            # Decrypt RCON password
-            rcon_password = self.secure_settings.decrypt(server['rcon_password'])
-            
-            with MCRcon("localhost", rcon_password, int(config['rcon.port']), 
-                      timeout=Constants.RCON_TIMEOUT) as mcr:
-                response = mcr.command(cmd)
-                self.console_output.append(f"> {cmd}\n{response}")
-        except ConnectionRefusedError:
-            self.show_error("RCON connection refused - check if enabled")
-        except Exception as e:
-            self.show_error(f"Command failed: {str(e)}")
-
-    # This method stays the same - it handles console input
-    def on_command_enter(self):
-        cmd = self.command_input.text()
-        self.command_input.clear()
-        if not self.current_server or not cmd:
-            return
-        self.send_rcon_command(cmd)
 
     def delete_server(self):
         if not self.current_server:
             return
-
+        
         reply = QMessageBox.question(
             self, "Delete Server", f"Permanently delete '{self.current_server}'?",
             QMessageBox.Yes | QMessageBox.No
         )
-
+        
         if reply == QMessageBox.Yes:
             server_path = self.servers[self.current_server]['path']
             try:
-                # Stop server if running
-                server = self.servers[self.current_server]
-                if server['status'] != Constants.SERVER_STATUS["STOPPED"]:
-                    self.stop_server()
-                    # Wait for server to stop
-                    for _ in range(10):  # 10 attempts with 0.5s delay
-                        if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
-                            break
-                        time.sleep(0.5)
-
-                # Use more robust deletion method
                 if os.path.exists(server_path):
-                    # Use shutil.rmtree which handles permissions better
-                    def on_error(func, path, exc_info):
-                        # Try to fix permissions and retry
-                        os.chmod(path, stat.S_IWRITE)
-                        func(path)
-
-                    shutil.rmtree(server_path, onerror=on_error)
-
-                    # Verify deletion
-                    if os.path.exists(server_path):
-                        raise RuntimeError(f"Failed to delete directory: {server_path}")
-
+                    if platform.system() == "Windows":
+                        subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', server_path], check=True)
+                    else:
+                        subprocess.run(["rm", "-rf", server_path], check=True)
                 del self.servers[self.current_server]
                 self.current_server = None
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Server deleted", 3000)
             except Exception as e:
-                self.show_error(f"Delete failed: {str(e)}\n\n"
-                               "Common solutions:\n"
-                               "1. Close any programs using the directory\n"
-                               "2. Check file permissions\n"
-                               "3. Delete manually: " + server_path)
-            if not self.current_server:
-                return
-
-            reply = QMessageBox.question(
-                self, "Delete Server", f"Permanently delete '{self.current_server}'?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-
-            if reply == QMessageBox.Yes:
-                server_path = self.servers[self.current_server]['path']
-                try:
-                    if os.path.exists(server_path):
-                        if platform.system() == "Windows":
-                            subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', server_path], check=True)
-                        else:
-                            subprocess.run(["rm", "-rf", server_path], check=True)
-                    del self.servers[self.current_server]
-                    self.current_server = None
-                    self.save_profiles()
-                    self.update_server_list()
-                    self.statusBar().showMessage("Server deleted", 3000)
-                except Exception as e:
-                    self.show_error(f"Delete failed: {str(e)}")
+                self.show_error(f"Delete failed: {str(e)}")
 
     def create_backup(self):
         if not self.current_server:
@@ -1402,8 +1297,7 @@ class ServerManager(QMainWindow):
         try:
             server_path = self.servers[self.current_server]['path']
             backup_path = BackupManager(server_path).create_backup()
-            if backup_path:
-                self.show_info(f"Backup created: {os.path.basename(backup_path)}")
+            self.show_info(f"Backup created: {os.path.basename(backup_path)}")
         except Exception as e:
             self.show_error(f"Backup failed: {str(e)}")
 
@@ -1419,16 +1313,15 @@ class ServerManager(QMainWindow):
             except Exception as e:
                 self.show_error(f"Open failed: {str(e)}")
 
-    def create_server_properties(self, server_dir):
-        """Create default server.properties file with secure RCON"""
-        # Generate secure RCON password
-        rcon_password = secrets.token_urlsafe(16)
-        
+    def create_server_properties(self, server_dir, rcon_password):  # Add password parameter
+        """Create default server.properties file with RCON password"""
         properties_path = os.path.join(server_dir, "server.properties")
         with open(properties_path, 'w') as f:
             f.write("# Minecraft server properties\n")
             f.write("enable-jmx-monitoring=false\n")
             f.write("rcon.port=25575\n")
+            f.write("enable-rcon=true\n")  # Enable RCON by default
+            f.write(f"rcon.password={rcon_password}\n")  # Add password here
             f.write("level-seed=\n")
             f.write("enable-command-block=false\n")
             f.write("gamemode=survival\n")
@@ -1454,7 +1347,6 @@ class ServerManager(QMainWindow):
             f.write("resource-pack-prompt=\n")
             f.write("allow-nether=true\n")
             f.write("server-port=25565\n")
-            f.write("enable-rcon=true\n")  # Enable RCON by default
             f.write("sync-chunk-writes=true\n")
             f.write("op-permission-level=4\n")
             f.write("prevent-proxy-connections=false\n")
@@ -1462,7 +1354,6 @@ class ServerManager(QMainWindow):
             f.write("resource-pack=\n")
             f.write("entity-broadcast-range-percentage=100\n")
             f.write("simulation-distance=16\n")
-            f.write(f"rcon.password={rcon_password}\n")  # Set secure password
             f.write("player-idle-timeout=0\n")
             f.write("debug=false\n")
             f.write("force-gamemode=true\n")
@@ -1596,9 +1487,11 @@ class ServerManager(QMainWindow):
             self.load_item_icon(data['id'], data['icon_url'], icon)
 
     def load_item_icon(self, item_id, url, target_label):
-        loader = ImageLoader(url, item_id)
+        loader = ImageLoaderThread(url, item_id)
         loader.loaded.connect(lambda i, p: self.update_icon(target_label, p))
-        self.thread_pool.start(loader)
+        loader.finished.connect(lambda: self.current_image_loaders.remove(loader))
+        self.current_image_loaders.append(loader)
+        loader.start()
 
     def update_icon(self, label, pixmap):
         label.setPixmap(pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1618,23 +1511,13 @@ class ServerManager(QMainWindow):
             server_path = self.servers[self.current_server]['path']
             target_dir = os.path.join(server_path, target_type)
             os.makedirs(target_dir, exist_ok=True)
-            mc_version = self.servers[self.current_server]['mc_version']
             
             if self.mods_platform_combo.currentText() == "Modrinth":
-                # Filter compatible versions
-                compatible_versions = [
-                    v for v in resource['versions']
-                    if mc_version in v.get('game_versions', [])
-                ]
-                if not compatible_versions:
-                    raise ValueError("No compatible version found for your Minecraft version")
-                    
-                version = compatible_versions[0]
+                version = resource['versions'][0]
                 file = version['files'][0]
                 url = file['url']
                 filename = file['filename']
             else:
-                # For CurseForge, use first file for now
                 file = resource['versions'][0]
                 url = file['downloadUrl']
                 filename = file['fileName']
@@ -1649,9 +1532,7 @@ class ServerManager(QMainWindow):
                 if reply != QMessageBox.Yes:
                     return
             
-            # Use our robust downloader
-            downloader = FileDownloader()
-            downloader.download_file(url, dest_path)
+            self.download_file(url, dest_path)
             self.show_info(f"Installed {filename}")
         except Exception as e:
             self.show_error(f"Install failed: {str(e)}")
@@ -1698,3 +1579,9 @@ if __name__ == "__main__":
     window = ServerManager()
     window.show()
     sys.exit(app.exec())
+
+
+
+'''
+apply the last fix from deepseak not implemented
+'''
