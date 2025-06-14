@@ -718,7 +718,8 @@ class ServerManager(QMainWindow):
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.command_input = QLineEdit()
-        self.command_input.returnPressed.connect(self.send_command)
+        # Changed from send_command to on_command_enter
+        self.command_input.returnPressed.connect(self.on_command_enter)
         layout.addWidget(self.console_output)
         layout.addWidget(self.command_input)
 
@@ -1139,32 +1140,6 @@ class ServerManager(QMainWindow):
         self.file_model.setRootPath(server_data['path'])
         self.file_view.setRootIndex(self.file_model.index(server_data['path']))
 
-    def send_command(self):
-        cmd = self.command_input.text()
-        self.command_input.clear()
-        if not self.current_server or not cmd:
-            return
-        
-        try:
-            server = self.servers[self.current_server]
-            props_path = os.path.join(server['path'], Constants.FILES["SERVER_PROPERTIES"])
-            
-            with open(props_path, 'r') as f:
-                config = {line.split('=')[0]: line.split('=')[1].strip() 
-                        for line in f if '=' in line}
-            
-            # Decrypt RCON password
-            rcon_password = self.secure_settings.decrypt(server['rcon_password'])
-            
-            with MCRcon("localhost", rcon_password, int(config['rcon.port']), 
-                      timeout=Constants.RCON_TIMEOUT) as mcr:
-                response = mcr.command(cmd)
-                self.console_output.append(f"> {cmd}\n{response}")
-        except ConnectionRefusedError:
-            self.show_error("RCON connection refused - check if enabled")
-        except Exception as e:
-            self.show_error(f"Command failed: {str(e)}")
-
     def start_server(self):
         if not self.current_server:
             return
@@ -1221,7 +1196,8 @@ class ServerManager(QMainWindow):
     def stop_server(self):
         if self.current_server and self.servers[self.current_server]['status'] == Constants.SERVER_STATUS["RUNNING"]:
             try:
-                self.send_command("stop")
+                # Use send_rcon_command instead of send_command
+                self.send_rcon_command("stop")
                 self.servers[self.current_server]['thread'].stop()
                 self.servers[self.current_server]['status'] = Constants.SERVER_STATUS["STOPPING"]
                 self.save_profiles()
@@ -1230,30 +1206,109 @@ class ServerManager(QMainWindow):
             except Exception as e:
                 self.show_error(f"Stop failed: {str(e)}")
 
+    def send_rcon_command(self, cmd):
+        """Send RCON command directly"""
+        if not self.current_server or not cmd:
+            return
+        
+        try:
+            server = self.servers[self.current_server]
+            props_path = os.path.join(server['path'], Constants.FILES["SERVER_PROPERTIES"])
+            
+            with open(props_path, 'r') as f:
+                config = {line.split('=')[0]: line.split('=')[1].strip() 
+                        for line in f if '=' in line}
+            
+            # Decrypt RCON password
+            rcon_password = self.secure_settings.decrypt(server['rcon_password'])
+            
+            with MCRcon("localhost", rcon_password, int(config['rcon.port']), 
+                      timeout=Constants.RCON_TIMEOUT) as mcr:
+                response = mcr.command(cmd)
+                self.console_output.append(f"> {cmd}\n{response}")
+        except ConnectionRefusedError:
+            self.show_error("RCON connection refused - check if enabled")
+        except Exception as e:
+            self.show_error(f"Command failed: {str(e)}")
+
+    # This method stays the same - it handles console input
+    def on_command_enter(self):
+        cmd = self.command_input.text()
+        self.command_input.clear()
+        if not self.current_server or not cmd:
+            return
+        self.send_rcon_command(cmd)
+
     def delete_server(self):
         if not self.current_server:
             return
-        
+
         reply = QMessageBox.question(
             self, "Delete Server", f"Permanently delete '{self.current_server}'?",
             QMessageBox.Yes | QMessageBox.No
         )
-        
+
         if reply == QMessageBox.Yes:
             server_path = self.servers[self.current_server]['path']
             try:
+                # Stop server if running
+                server = self.servers[self.current_server]
+                if server['status'] != Constants.SERVER_STATUS["STOPPED"]:
+                    self.stop_server()
+                    # Wait for server to stop
+                    for _ in range(10):  # 10 attempts with 0.5s delay
+                        if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
+                            break
+                        time.sleep(0.5)
+
+                # Use more robust deletion method
                 if os.path.exists(server_path):
-                    if platform.system() == "Windows":
-                        subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', server_path], check=True)
-                    else:
-                        subprocess.run(["rm", "-rf", server_path], check=True)
+                    # Use shutil.rmtree which handles permissions better
+                    def on_error(func, path, exc_info):
+                        # Try to fix permissions and retry
+                        os.chmod(path, stat.S_IWRITE)
+                        func(path)
+
+                    shutil.rmtree(server_path, onerror=on_error)
+
+                    # Verify deletion
+                    if os.path.exists(server_path):
+                        raise RuntimeError(f"Failed to delete directory: {server_path}")
+
                 del self.servers[self.current_server]
                 self.current_server = None
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Server deleted", 3000)
             except Exception as e:
-                self.show_error(f"Delete failed: {str(e)}")
+                self.show_error(f"Delete failed: {str(e)}\n\n"
+                               "Common solutions:\n"
+                               "1. Close any programs using the directory\n"
+                               "2. Check file permissions\n"
+                               "3. Delete manually: " + server_path)
+            if not self.current_server:
+                return
+
+            reply = QMessageBox.question(
+                self, "Delete Server", f"Permanently delete '{self.current_server}'?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+
+            if reply == QMessageBox.Yes:
+                server_path = self.servers[self.current_server]['path']
+                try:
+                    if os.path.exists(server_path):
+                        if platform.system() == "Windows":
+                            subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', server_path], check=True)
+                        else:
+                            subprocess.run(["rm", "-rf", server_path], check=True)
+                    del self.servers[self.current_server]
+                    self.current_server = None
+                    self.save_profiles()
+                    self.update_server_list()
+                    self.statusBar().showMessage("Server deleted", 3000)
+                except Exception as e:
+                    self.show_error(f"Delete failed: {str(e)}")
 
     def create_backup(self):
         if not self.current_server:
