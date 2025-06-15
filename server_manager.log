@@ -1,0 +1,24 @@
+2025-06-15 14:08:02,418 - INFO - Minecraft Server Manager started
+2025-06-15 14:08:08,297 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 14:14:36,916 - INFO - Minecraft Server Manager started
+2025-06-15 14:18:08,575 - INFO - Minecraft Server Manager started
+2025-06-15 14:18:15,017 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 14:26:38,512 - INFO - Minecraft Server Manager started
+2025-06-15 14:26:50,299 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 14:32:19,123 - DEBUG - Starting new HTTPS connection (1): api.papermc.io:443
+2025-06-15 14:32:21,022 - DEBUG - https://api.papermc.io:443 "GET /v2/projects/paper HTTP/1.1" 200 None
+2025-06-15 14:37:37,405 - INFO - Minecraft Server Manager started
+2025-06-15 14:37:42,254 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 14:38:21,043 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 14:38:22,440 - ERROR - Server Error: ERROR StatusConsoleListener Unable to delete file C:\Users\HP\Desktop\Desktop\arush\servers\1\logs\latest.log: java.nio.file.FileSystemException C:\Users\HP\Desktop\Desktop\arush\servers\1\logs\latest.log: The process cannot access the file because it is being used by another process
+2025-06-15 14:38:29,858 - ERROR - Server Error: [14:38:29 ERROR]: Failed to start the minecraft server
+2025-06-15 14:38:29,860 - ERROR - Server Error: java.io.IOException: The process cannot access the file because another process has locked a portion of the file
+2025-06-15 14:38:47,594 - INFO - Minecraft Server Manager started
+2025-06-15 14:38:51,903 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 14:45:38,154 - INFO - Minecraft Server Manager started
+2025-06-15 14:45:44,738 - INFO - Starting server with command: java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 19:08:08,290 - INFO - DEBUG - Received message: [19:08:08 INFO]: Done preparing level "world" (2.633s)
+2025-06-15 19:08:08,311 - INFO - DEBUG - Received message: [19:08:08 INFO]: Done (23.296s)! For help, type "help"
+2025-06-15 19:18:43,332 - INFO - Starting server with command: java -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-15 19:20:43,342 - WARNING - Server start timed out after 120.0 seconds
+2025-06-15 19:21:27,590 - INFO - Starting server with command: java -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui

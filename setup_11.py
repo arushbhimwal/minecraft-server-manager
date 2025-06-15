@@ -23,13 +23,15 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QLabel, QTabWidget, QTextEdit,
     QLineEdit, QFileDialog, QMessageBox, QTreeView, QFileSystemModel,
     QInputDialog, QListWidget, QListWidgetItem, QProgressBar,
-    QScrollArea, QFormLayout
+    QScrollArea, QFormLayout, QDialog, QDialogButtonBox, QGridLayout
 )
-from PySide6.QtGui import QPixmap, QImage, QColor, QKeySequence, QShortcut
-from PySide6.QtCore import Qt, QThread, Signal, QDir, QTimer
+from PySide6.QtGui import QPixmap, QImage, QColor, QKeySequence, QShortcut, QFont, QStandardItemModel, QStandardItem
+from PySide6.QtCore import Qt, QThread, Signal, QDir, QTimer, QProcess
 import qdarktheme
 
-# Constants
+# =============================================================================
+# CONSTANTS & SECURITY SETTINGS
+# =============================================================================
 class Constants:
     HEADERS = {
         "DEFAULT_USER_AGENT": "MinecraftServerManager/1.0 (+https://github.com/arushbhimwal/minecraft-server-manager)"
@@ -45,18 +47,33 @@ class Constants:
         "SETTINGS": "settings.json",
         "SERVER_JAR": "server.jar",
         "SERVER_PROPERTIES": "server.properties",
-        "EULA_FILE": "eula.txt"
+        "EULA_FILE": "eula.txt",
+        "MOD_MANIFEST": "mod_manifest.json",
+        "PID_FILE": "server.pid"
     }
     API_ENDPOINTS = {
         "VANILLA_MANIFEST": "https://piston-meta.mojang.com/mc/game/version_manifest.json",
         "PAPER_VERSIONS": "https://api.papermc.io/v2/projects/paper",
         "MODRINTH_VERSIONS": "https://api.modrinth.com/v2/tag/game_version",
-        "FABRIC_VERSIONS": "https://meta.fabricmc.net/v2/versions/game"
+        "FABRIC_VERSIONS": "https://meta.fabricmc.net/v2/versions/game",
+        "MODRINTH_SEARCH": "https://api.modrinth.com/v2/search"
     }
     MAX_CONSOLE_LINES = 1000
     RCON_TIMEOUT = 5
     BACKUP_DIR = "backups"
     SECURITY_KEY_FILE = ".encryption.key"
+    MODRINTH_PAGE_SIZE = 10
+    MAX_CACHE_SIZE = 32
+    JAVA_VERSIONS = ['8', '11', '17', '21']
+    LOADERS = ['Vanilla', 'Paper', 'Spigot', 'Forge', 'Fabric', 'Quilt', 'Mohist']
+
+def sanitize_filename(name):
+    """Remove potentially dangerous characters from filenames"""
+    return re.sub(r'[\\/*?:"<>|]', "", name)
+
+def sanitize_command(cmd):
+    """Basic command sanitization"""
+    return re.sub(r'[;&|`$]', "", cmd)
 
 class SecureSettings:
     def __init__(self):
@@ -67,7 +84,6 @@ class SecureSettings:
             key = Fernet.generate_key()
             with open(Constants.SECURITY_KEY_FILE, 'wb') as f: 
                 f.write(key)
-            # Set secure permissions on non-Windows systems
             if platform.system() != 'Windows':
                 os.chmod(Constants.SECURITY_KEY_FILE, 0o600)
         else:
@@ -80,119 +96,90 @@ class SecureSettings:
     
     def decrypt(self, encrypted_data):
         return self.cipher.decrypt(encrypted_data.encode()).decode()
-    
+
+# =============================================================================
+# UTILITY CLASSES
+# =============================================================================
 class FileDownloader:
-    """Robust file downloader with improved output parsing"""
+    """Robust file downloader with curl and requests fallback"""
     
     def __init__(self):
         self.max_retries = 5
-        self.retry_delay_base = 1  # seconds
-        self.curl_timeout = 600  # 10 minutes timeout
+        self.retry_delay_base = 1
+        self.timeout = 600
     
     def download_file(self, url, path):
-        """Download directly to target path"""
-        # Create target directory if needed
-        target_dir = os.path.dirname(path)
-        os.makedirs(target_dir, exist_ok=True)
-        
-        curl_cmd = [
-            "curl",
-            "-L",  # Follow redirects
-            "-o", path,  # Download directly to target path
-            "-w", "%{http_code} %{size_download}",  # Only require these two values
-            "-s",  # Silent mode
-            "-S",  # Show errors even in silent mode
-            "--max-time", str(self.curl_timeout),
-            "--retry", "3",  # Retry on transient errors
-            "--retry-delay", "2",  # Wait between retries
-            "--fail",  # Fail on HTTP errors
-            url
-        ]
-        
+        """Download file with curl or requests fallback"""
+        if self._try_curl_download(url, path):
+            return path
+        return self._requests_download(url, path)
+    
+    def _try_curl_download(self, url, path):
+        try:
+            subprocess.run(["curl", "--version"], capture_output=True, check=True)
+            curl_cmd = [
+                "curl", "-L", "-o", path, "-w", "%{http_code} %{size_download}",
+                "-s", "-S", "--max-time", str(self.timeout), "--retry", "3",
+                "--retry-delay", "2", "--fail", url
+            ]
+            
+            result = subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=self.timeout + 30
+            )
+            
+            output = result.stdout.strip()
+            if not output:
+                return False
+                
+            parts = output.split()
+            if len(parts) < 2:
+                return False
+                
+            http_code = parts[0]
+            downloaded_size = int(parts[1])
+            
+            if not http_code.isdigit() or int(http_code) >= 400:
+                return False
+                
+            if not os.path.exists(path):
+                return False
+                
+            actual_size = os.path.getsize(path)
+            if actual_size != downloaded_size:
+                os.remove(path)
+                return False
+                
+            return True
+        except Exception:
+            return False
+            
+    def _requests_download(self, url, path):
         for attempt in range(self.max_retries):
             try:
-                print(f"Download attempt {attempt+1}/{self.max_retries}")
-                print(f"  URL: {url}")
-                print(f"  Target: {path}")
-                
-                # Run curl command
-                result = subprocess.run(
-                    curl_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=self.curl_timeout + 30
-                )
-                
-                # Parse curl output
-                output = result.stdout.strip()
-                if not output:
-                    raise ValueError("Empty response from curl")
-                
-                # Split output into parts
-                parts = output.split()
-                
-                # Validate we have at least 2 parts (http_code and downloaded size)
-                if len(parts) < 2:
-                    raise ValueError(
-                        f"Unexpected curl output format. "
-                        f"Expected at least 2 values, got {len(parts)}: {output}"
-                    )
-                
-                http_code = parts[0]
-                downloaded_size = int(parts[1])
-                
-                # Validate HTTP status
-                if not http_code.isdigit() or int(http_code) >= 400:
-                    raise ValueError(f"HTTP error: {http_code}")
-                
-                # Verify file exists
-                if not os.path.exists(path):
-                    raise FileNotFoundError(f"File not created at {path}")
-                
-                # Get actual file size
-                actual_size = os.path.getsize(path)
-                
-                # Compare curl's reported size with actual file size
-                if actual_size != downloaded_size:
-                    raise ValueError(
-                        f"File size mismatch: curl reported {downloaded_size}, "
-                        f"actual size {actual_size}"
-                    )
-                
-                print(f"Download successful! Size: {actual_size} bytes")
+                with requests.get(url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
                 return path
-                
-            except (subprocess.CalledProcessError, ValueError, OSError) as e:
-                error_msg = f"Download error: {str(e)}"
-                print(error_msg)
-                
-                # Clean up partial download
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                        print(f"Removed partial file: {path}")
-                    except OSError as remove_error:
-                        print(f"Failed to remove partial file: {str(remove_error)}")
-                
+            except Exception as e:
                 if attempt < self.max_retries - 1:
-                    delay = self.retry_delay_base * (2 ** attempt)
-                    print(f"Retrying in {delay:.1f} seconds...")
-                    time.sleep(delay)
+                    time.sleep(self.retry_delay_base * (2 ** attempt))
                 else:
-                    final_error = f"Download failed after {self.max_retries} attempts: {str(e)}"
-                    print(final_error)
-                    raise RuntimeError(final_error) from e
+                    raise RuntimeError(f"Download failed: {str(e)}")
 
 class BackupManager:
-    """Handles server backups"""
+    """Handles server backups with proper directory exclusion"""
     
     def __init__(self, server_path):
         self.server_path = server_path
         self.backup_dir = os.path.join(server_path, Constants.BACKUP_DIR)
         
     def create_backup(self):
-        """Create a zip backup of the server"""
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_path = os.path.join(self.backup_dir, f"backup-{timestamp}.zip")
         os.makedirs(self.backup_dir, exist_ok=True)
@@ -200,10 +187,8 @@ class BackupManager:
         try:
             with zipfile.ZipFile(backup_path, 'w') as zipf:
                 for root, _, files in os.walk(self.server_path):
-                    # Skip backup directory itself
-                    if Constants.BACKUP_DIR in root:
+                    if os.path.basename(root) == Constants.BACKUP_DIR:
                         continue
-                        
                     for file in files:
                         full_path = os.path.join(root, file)
                         arcname = os.path.relpath(full_path, self.server_path)
@@ -214,64 +199,80 @@ class BackupManager:
             raise
 
 class ModrinthAPI:
-    @lru_cache(maxsize=100)
+    @lru_cache(maxsize=Constants.MAX_CACHE_SIZE)
     def get_versions(self, project_id):
         headers = {'User-Agent': Constants.HEADERS["DEFAULT_USER_AGENT"]}
         response = requests.get(
             f'https://api.modrinth.com/v2/project/{project_id}/version',
-            headers=headers
+            headers=headers,
+            timeout=10
         )
         return response.json()
 
+    def search_mods(self, query, mc_version=None, loader=None, page=0):
+        params = {
+            'query': query,
+            'limit': Constants.MODRINTH_PAGE_SIZE,
+            'offset': page * Constants.MODRINTH_PAGE_SIZE
+        }
+        
+        facets = []
+        if mc_version:
+            facets.append(f"versions:{mc_version}")
+        if loader:
+            facets.append(f"categories:{loader.lower()}")
+        
+        if facets:
+            params['facets'] = json.dumps([facets])
+        
+        response = requests.get(
+            Constants.API_ENDPOINTS["MODRINTH_SEARCH"],
+            params=params,
+            headers={'User-Agent': Constants.HEADERS["DEFAULT_USER_AGENT"]},
+            timeout=15
+        )
+        response.raise_for_status()
+        return response.json()
+
 class CurseForgeAPI:
-    @lru_cache(maxsize=100)
+    @lru_cache(maxsize=Constants.MAX_CACHE_SIZE)
     def get_file_info(self, file_id, api_key):
         headers = {'x-api-key': api_key}
         response = requests.get(
             f'https://api.curseforge.com/v1/mods/files/{file_id}',
-            headers=headers
+            headers=headers,
+            timeout=10
         )
         return response.json()
 
+# =============================================================================
+# THREAD WORKERS
+# =============================================================================
 class ModSearchThread(QThread):
-    """Thread for searching mods on Modrinth"""
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, query, mc_version, loader):
+    def __init__(self, query, mc_version, loader, page=0):
         super().__init__()
         self.query = query
         self.mc_version = mc_version
         self.loader = loader
+        self.page = page
         self.api = ModrinthAPI()
 
     def run(self):
         try:
-            # Construct facets for search
-            facets = []
-            if self.mc_version:
-                facets.append(f"versions:{self.mc_version}")
-            if self.loader:
-                facets.append(f"categories:{self.loader.lower()}")
-            
-            params = {
-                'query': self.query,
-                'facets': json.dumps([facets]) if facets else '',
-                'limit': 10
-            }
-            
-            response = requests.get(
-                'https://api.modrinth.com/v2/search',
-                params=params,
-                headers={'User-Agent': Constants.HEADERS["DEFAULT_USER_AGENT"]},
-                timeout=10
+            results = self.api.search_mods(
+                self.query, 
+                self.mc_version, 
+                self.loader,
+                self.page
             )
-            response.raise_for_status()
             
-            results = []
-            for hit in response.json()['hits']:
+            formatted = []
+            for hit in results['hits']:
                 versions = self.api.get_versions(hit['project_id'])
-                results.append({
+                formatted.append({
                     'project_id': hit['project_id'],
                     'title': hit['title'],
                     'description': hit['description'],
@@ -279,12 +280,11 @@ class ModSearchThread(QThread):
                     'versions': versions
                 })
                 
-            self.finished.emit(results)
+            self.finished.emit(formatted)
         except Exception as e:
             self.error.emit(str(e))
 
 class CurseForgeSearchThread(QThread):
-    """Thread for searching mods on CurseForge"""
     finished = Signal(list)
     error = Signal(str)
 
@@ -298,7 +298,7 @@ class CurseForgeSearchThread(QThread):
         try:
             headers = {'x-api-key': self.api_key}
             params = {
-                'gameId': 432,  # Minecraft
+                'gameId': 432,
                 'categoryId': self.category_id,
                 'searchFilter': self.query,
                 'pageSize': 10
@@ -327,8 +327,7 @@ class CurseForgeSearchThread(QThread):
             self.error.emit(str(e))
 
 class ImageLoaderThread(QThread):
-    """Thread for loading item icons"""
-    loaded = Signal(str, QPixmap)  # (item_id, pixmap)
+    loaded = Signal(str, QPixmap)
     finished = Signal()
 
     def __init__(self, url, item_id):
@@ -343,7 +342,6 @@ class ImageLoaderThread(QThread):
             pixmap = QPixmap.fromImage(img)
             self.loaded.emit(self.item_id, pixmap)
         except Exception:
-            # Create a placeholder pixmap
             pixmap = QPixmap(80, 80)
             pixmap.fill(QColor(200, 200, 200))
             self.loaded.emit(self.item_id, pixmap)
@@ -351,8 +349,7 @@ class ImageLoaderThread(QThread):
             self.finished.emit()
 
 class UrlInstallThread(QThread):
-    """Thread for installing mods/plugins from URLs"""
-    progress = Signal(int, str)  # (progress_value, status_message)
+    progress = Signal(int, str)
     finished = Signal()
     error = Signal(str)
 
@@ -361,7 +358,7 @@ class UrlInstallThread(QThread):
         self.urls = urls
         self.server_path = server_path
         self.api_key = api_key
-        self.target_type = target_type  # "mods" or "plugins"
+        self.target_type = target_type
         self.downloader = FileDownloader()
 
     def run(self):
@@ -369,8 +366,6 @@ class UrlInstallThread(QThread):
             total = len(self.urls)
             success = 0
             target_dir = os.path.join(self.server_path, self.target_type)
-            
-            # Create directory if needed
             os.makedirs(target_dir, exist_ok=True)
             
             for i, url in enumerate(self.urls):
@@ -386,8 +381,7 @@ class UrlInstallThread(QThread):
                         filename = self.download_direct(url, target_dir)
                     
                     success += 1
-                    self.progress.emit(int(100 * (i+1) / total), 
-                                      f"Installed: {filename}")
+                    self.progress.emit(int(100 * (i+1) / total), f"Installed: {filename}")
                 except Exception as e:
                     self.error.emit(f"URL {url} failed: {str(e)}")
             
@@ -397,8 +391,6 @@ class UrlInstallThread(QThread):
             self.error.emit(f"Installation failed: {str(e)}")
 
     def process_curseforge_url(self, url, target_dir):
-        """Process CurseForge URLs using their API"""
-        # Extract project ID from URL
         match = re.search(r'/projects/([^/]+)', url)
         if not match:
             raise ValueError("Invalid CurseForge URL format")
@@ -406,7 +398,6 @@ class UrlInstallThread(QThread):
         project_slug = match.group(1)
         headers = {'x-api-key': self.api_key}
         
-        # Get project ID
         search_url = f"https://api.curseforge.com/v1/mods/search?gameId=432&slug={project_slug}"
         response = requests.get(search_url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -417,7 +408,6 @@ class UrlInstallThread(QThread):
             
         project_id = data['data'][0]['id']
         
-        # Get latest file
         files_url = f"https://api.curseforge.com/v1/mods/{project_id}/files"
         response = requests.get(files_url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -438,43 +428,39 @@ class UrlInstallThread(QThread):
         return filename
 
     def download_direct(self, url, target_dir):
-        """Download directly from URL"""
-        # Extract filename from URL
         parsed = requests.utils.urlparse(url)
-        filename = os.path.basename(parsed.path)
-        
-        if not filename:
-            # Generate filename if not found in URL
-            filename = f"downloaded_{int(time.time())}.jar"
-        
+        filename = os.path.basename(parsed.path) or f"downloaded_{int(time.time())}.jar"
         dest_path = os.path.join(target_dir, filename)
         self.downloader.download_file(url, dest_path)
         return filename
-    
+
 class ServerThread(QThread):
-    """Thread for running the Minecraft server"""
     output = Signal(str)
     stopped = Signal()
     error = Signal(str)
 
-    def __init__(self, command, cwd):
+    def __init__(self, command, cwd, java_path=None):
         super().__init__()
         self.command = command
         self.cwd = cwd
+        self.java_path = java_path or "java"
         self.process = None
         self.running = False
 
     def run(self):
         self.running = True
         try:
+            # Use the configured Java path
+            full_command = [self.java_path] + self.command[1:]
+            
             if platform.system() == "Windows":
-                command_str = " ".join(self.command)
+                command_str = " ".join(full_command)
                 self.process = subprocess.Popen(
                     command_str,
                     cwd=self.cwd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    stdin=subprocess.PIPE,  # Add stdin pipe
+                    stdin=subprocess.PIPE,
                     text=True,
                     bufsize=1,
                     universal_newlines=True,
@@ -482,15 +468,20 @@ class ServerThread(QThread):
                 )
             else:
                 self.process = subprocess.Popen(
-                    self.command,
+                    full_command,
                     cwd=self.cwd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    stdin=subprocess.PIPE,  # Add stdin pipe
+                    stdin=subprocess.PIPE,
                     text=True,
                     bufsize=1,
                     universal_newlines=True
                 )
+                
+            # Write PID file
+            pid_file = os.path.join(self.cwd, Constants.FILES["PID_FILE"])
+            with open(pid_file, 'w') as f:
+                f.write(str(self.process.pid))
                 
             while self.running:
                 output = self.process.stdout.readline()
@@ -504,7 +495,6 @@ class ServerThread(QThread):
             self.stopped.emit()
 
     def send_command(self, command):
-        """Send a command directly to the server process"""
         if self.process and self.process.stdin:
             try:
                 self.process.stdin.write(command + "\n")
@@ -518,33 +508,74 @@ class ServerThread(QThread):
         self.running = False
         if self.process:
             try:
-                # First try to send stop command directly
-                if self.process.stdin:
-                    self.process.stdin.write("stop\n")
-                    self.process.stdin.flush()
-                    self.process.wait(10)  # Wait 10 seconds for clean shutdown
-                
-                # If still running, terminate
-                if self.process.poll() is None:
+                self.send_command("stop")
+                if not self.wait_for_stop(30):
                     self.process.terminate()
-                    self.process.wait(5)
-                    if self.process.poll() is None:
+                    if not self.wait_for_stop(5):
                         self.process.kill()
             except Exception as e:
                 self.error.emit(f"Error stopping process: {str(e)}")
+            finally:
+                pid_file = os.path.join(self.cwd, Constants.FILES["PID_FILE"])
+                if os.path.exists(pid_file):
+                    try:
+                        os.remove(pid_file)
+                    except Exception:
+                        pass
 
+    def wait_for_stop(self, timeout):
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.process.poll() is not None:
+                return True
+            time.sleep(0.5)
+        return False
+
+# =============================================================================
+# DIALOG CLASSES
+# =============================================================================
+class VersionSelectDialog(QDialog):
+    def __init__(self, versions, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Version")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        self.version_combo = QComboBox()
+        
+        for version in versions:
+            game_versions = ", ".join(version.get('game_versions', ['Unknown']))
+            self.version_combo.addItem(
+                f"{version['version_number']} (MC: {game_versions})", 
+                userData=version
+            )
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(QLabel("Select version to install:"))
+        layout.addWidget(self.version_combo)
+        layout.addWidget(button_box)
+    
+    def selected_version(self):
+        return self.version_combo.currentData()
+
+# =============================================================================
+# MAIN APPLICATION
+# =============================================================================
 class ServerManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.java_versions = ['8', '11', '17', '21']
-        self.loaders = ['Vanilla', 'Paper', 'Spigot', 'Forge', 'Fabric', 'Quilt', 'Mohist']
+        self.java_versions = Constants.JAVA_VERSIONS
+        self.loaders = Constants.LOADERS
         self.servers = {}
         self.current_server = None
         self.current_image_loaders = []
-        self.api_keys = {'curseforge': ''}
+        self.api_keys = {'curseforge': '', 'java_paths': {}}
         self.secure_settings = SecureSettings()
+        self.console_buffer = []
         
-        # Initialize UI and components
         self.init_ui()
         self.load_profiles()
         self.check_java()
@@ -553,21 +584,25 @@ class ServerManager(QMainWindow):
         self.setStyleSheet(self.get_style_sheet())
         self.statusBar().showMessage("Ready")
         
-        # Server status monitoring timer
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self.update_server_status)
-        self.status_timer.start(2000)  # Check every 2 seconds
+        self.status_timer.start(2000)
+        
+        self.console_update_timer = QTimer(self)
+        self.console_update_timer.timeout.connect(self.update_console_display)
+        self.console_update_timer.setSingleShot(True)
+
+        self.server_start_time = None
+        self.start_timeout_timer = QTimer(self)
+        self.start_timeout_timer.timeout.connect(self.check_start_timeout)
+        self.start_timeout_timer.setSingleShot(True)
 
     def setup_logging(self):
         logging.basicConfig(
-            level=logging.DEBUG,  # Change to DEBUG for more details
+            level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('server_manager.log', encoding='utf-8'),
-                logging.StreamHandler()  # Also log to console
-            ]
+            handlers=[logging.FileHandler('server_manager.log', encoding='utf-8')]
         )
-        logging.info("Minecraft Server Manager started")
 
     def get_style_sheet(self):
         return """
@@ -576,6 +611,7 @@ class ServerManager(QMainWindow):
             QTabWidget::pane { border: 1px solid #444; margin: 2px; }
             QProgressBar { text-align: center; }
             QLabel { margin: 2px; }
+            QTreeView { font-family: monospace; }
         """
 
     def init_ui(self):
@@ -585,20 +621,19 @@ class ServerManager(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        # Left Panel
+        # Left Panel - Server List
         server_list_panel = QWidget()
         server_list_layout = QVBoxLayout(server_list_panel)
         self.setup_server_list(server_list_layout)
         main_layout.addWidget(server_list_panel, stretch=1)
 
-        # Right Panel
+        # Right Panel - Content
         content_panel = QWidget()
         content_layout = QVBoxLayout(content_panel)
         self.setup_creation_form(content_layout)
         self.setup_tabs(content_layout)
         main_layout.addWidget(content_panel, stretch=3)
 
-        # Shortcuts
         self.setup_shortcuts()
 
     def setup_server_list(self, layout):
@@ -636,7 +671,6 @@ class ServerManager(QMainWindow):
         creation_layout.addWidget(btn_create)
         layout.addLayout(creation_layout)
 
-        # Configuration
         config_layout = QHBoxLayout()
         self.java_combo = QComboBox()
         self.java_combo.addItems(self.java_versions)
@@ -672,6 +706,11 @@ class ServerManager(QMainWindow):
         self.setup_file_tab(file_tab)
         self.tabs.addTab(file_tab, "Files")
 
+        # Properties Editor Tab
+        properties_tab = QWidget()
+        self.setup_properties_tab(properties_tab)
+        self.tabs.addTab(properties_tab, "Properties")
+
         # Mods Tab
         mods_tab = QWidget()
         self.setup_mods_tab(mods_tab)
@@ -693,62 +732,59 @@ class ServerManager(QMainWindow):
         layout = QVBoxLayout(parent)
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
-
-        # Create a container for the command input
+        self.console_output.setFont(QFont("Courier New", 10))
+        
         input_container = QWidget()
         input_layout = QHBoxLayout(input_container)
         input_layout.setContentsMargins(0, 0, 0, 0)
-
+        
         self.command_input = QLineEdit()
         self.command_input.setPlaceholderText("Enter server command...")
-
-        # Connect returnPressed signal to send_command
         self.command_input.returnPressed.connect(self.send_command)
-
+        
         btn_send = QPushButton("Send")
-        btn_send.clicked.connect(self.send_command)  # Connect button to same handler
-
-        input_layout.addWidget(self.command_input, 4)  # 80% width
-        input_layout.addWidget(btn_send, 1)           # 20% width
-
+        btn_send.clicked.connect(self.send_command)
+        
+        input_layout.addWidget(self.command_input, 4)
+        input_layout.addWidget(btn_send, 1)
+        
         layout.addWidget(self.console_output)
         layout.addWidget(input_container)
-
-        # Set focus policy to ensure input field gets focus
         self.command_input.setFocusPolicy(Qt.StrongFocus)
-
-        # Shortcut to focus the command input
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(
             lambda: self.command_input.setFocus()
         )
-
-        # Ensure command input gets focus when console tab is selected
         self.tabs.currentChanged.connect(self.on_tab_changed)
-
-    def on_tab_changed(self, index):
-        """Handle tab changes to focus command input when console tab is selected"""
-        if self.tabs.tabText(index) == "Console":
-            self.command_input.setFocus()
 
     def setup_file_tab(self, parent):
         layout = QVBoxLayout(parent)
         self.file_model = QFileSystemModel()
-        # Set root path to home directory initially
         self.file_model.setRootPath(QDir.homePath())
         self.file_view = QTreeView()
         self.file_view.setModel(self.file_model)
-        self.file_view.setRootIndex(self.file_model.index(QDir.homePath()))
         self.file_view.doubleClicked.connect(self.open_file)
         btn_refresh = QPushButton("Refresh")
         btn_refresh.clicked.connect(self.refresh_file_view)
         layout.addWidget(self.file_view)
         layout.addWidget(btn_refresh)
 
+    def setup_properties_tab(self, parent):
+        layout = QVBoxLayout(parent)
+        self.properties_editor = QTextEdit()
+        self.properties_editor.setFont(QFont("Courier New", 10))
+        self.properties_editor.setPlaceholderText("server.properties content will appear here...")
+        
+        btn_save = QPushButton("Save Properties")
+        btn_save.clicked.connect(self.save_server_properties)
+        
+        layout.addWidget(QLabel("Edit server.properties:"))
+        layout.addWidget(self.properties_editor)
+        layout.addWidget(btn_save)
+
     def setup_mods_tab(self, parent):
         layout = QVBoxLayout(parent)
         layout.addLayout(self.create_url_section("mods"))
         
-        # Platform Selection
         platform_layout = QHBoxLayout()
         self.mods_platform_combo = QComboBox()
         self.mods_platform_combo.addItems(["Modrinth", "CurseForge"])
@@ -756,7 +792,6 @@ class ServerManager(QMainWindow):
         platform_layout.addWidget(self.mods_platform_combo)
         layout.addLayout(platform_layout)
 
-        # Search Section
         search_layout = QHBoxLayout()
         self.mod_search = QLineEdit()
         self.mod_search.setPlaceholderText("Search mods...")
@@ -766,19 +801,21 @@ class ServerManager(QMainWindow):
         search_layout.addWidget(btn_search)
         layout.addLayout(search_layout)
 
-        # Results List
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.mod_list_container = QWidget()
         self.mod_list_layout = QVBoxLayout(self.mod_list_container)
         scroll.setWidget(self.mod_list_container)
         layout.addWidget(scroll)
+        
+        btn_update = QPushButton("Check for Updates")
+        btn_update.clicked.connect(self.check_mod_updates)
+        layout.addWidget(btn_update)
 
     def setup_plugins_tab(self, parent):
         layout = QVBoxLayout(parent)
         layout.addLayout(self.create_url_section("plugins"))
         
-        # Platform Selection
         platform_layout = QHBoxLayout()
         self.plugins_platform_combo = QComboBox()
         self.plugins_platform_combo.addItems(["CurseForge", "Modrinth"])
@@ -786,7 +823,6 @@ class ServerManager(QMainWindow):
         platform_layout.addWidget(self.plugins_platform_combo)
         layout.addLayout(platform_layout)
 
-        # Search Section
         search_layout = QHBoxLayout()
         self.plugin_search = QLineEdit()
         self.plugin_search.setPlaceholderText("Search plugins...")
@@ -796,7 +832,6 @@ class ServerManager(QMainWindow):
         search_layout.addWidget(btn_search)
         layout.addLayout(search_layout)
 
-        # Results List
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.plugin_list_container = QWidget()
@@ -805,13 +840,35 @@ class ServerManager(QMainWindow):
         layout.addWidget(scroll)
 
     def setup_settings_tab(self, parent):
-        layout = QFormLayout(parent)
+        layout = QGridLayout(parent)
+        
+        # API Key Section
+        layout.addWidget(QLabel("CurseForge API Key:"), 0, 0)
         self.curseforge_key_input = QLineEdit()
-        self.curseforge_key_input.setPlaceholderText("Enter CurseForge API key...")
-        btn_save = QPushButton("Save API Key")
+        layout.addWidget(self.curseforge_key_input, 0, 1)
+        
+        # Java Path Configuration
+        layout.addWidget(QLabel("Java Paths:"), 1, 0, 1, 2)
+        
+        self.java_path_table = QTreeView()
+        self.java_path_model = QStandardItemModel()
+        self.java_path_model.setHorizontalHeaderLabels(["Version", "Path"])
+        self.java_path_table.setModel(self.java_path_model)
+        self.java_path_table.setRootIsDecorated(False)
+        layout.addWidget(self.java_path_table, 2, 0, 1, 2)
+        
+        btn_add_java = QPushButton("Add Java Path")
+        btn_add_java.clicked.connect(self.add_java_path)
+        layout.addWidget(btn_add_java, 3, 0)
+        
+        btn_remove_java = QPushButton("Remove Selected")
+        btn_remove_java.clicked.connect(self.remove_java_path)
+        layout.addWidget(btn_remove_java, 3, 1)
+        
+        # Save Button
+        btn_save = QPushButton("Save Settings")
         btn_save.clicked.connect(self.save_api_keys)
-        layout.addRow("CurseForge API Key:", self.curseforge_key_input)
-        layout.addRow(btn_save)
+        layout.addWidget(btn_save, 4, 0, 1, 2)
 
     def create_url_section(self, target_type):
         url_layout = QVBoxLayout()
@@ -843,43 +900,71 @@ class ServerManager(QMainWindow):
         
         return url_layout
 
+    def setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_file_view)
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.close)
+
+    # =============================================================================
+    # CORE FUNCTIONALITY
+    # =============================================================================
     def check_java(self):
-        """Check system for Java installation and populate versions"""
         try:
+            # Run java -version and capture output
             result = subprocess.run(
                 ['java', '-version'],
                 capture_output=True,
                 text=True,
-                check=True
+                stderr=subprocess.STDOUT
             )
-            version_info = result.stderr.splitlines()[0]
-            detected_version = version_info.split()[2].strip('\"').split('.')[0]
             
-            if detected_version in self.java_versions:
-                self.java_combo.setCurrentText(detected_version)
-            else:
-                self.show_error(f"Unsupported Java version: {detected_version}")
-                self.java_combo.setCurrentIndex(0)
+            # Get output from stdout or stderr
+            version_info = result.stdout or result.stderr
+            
+            # Handle different Java version formats:
+            # 1. OpenJDK format: "openjdk version \"21.0.1\" 2023-10-17"
+            # 2. Oracle format: "java version \"1.8.0_381\""
+            # 3. New Oracle format: "java 21.0.1 2023-10-17"
+            version_match = re.search(
+                r'version\s+"?(\d+(?:\.\d+)?(?:_\d+)?\b|(\d+)', 
+                version_info, 
+                re.IGNORECASE
+            )
+            
+            if version_match:
+                # Get the first matched group that isn't None
+                version_str = version_match.group(1) or version_match.group(2)
                 
-        except (subprocess.CalledProcessError, FileNotFoundError):
+                # Extract major version number
+                if '.' in version_str:
+                    major_version = version_str.split('.')[0]
+                elif '_' in version_str:
+                    major_version = version_str.split('_')[0]
+                else:
+                    major_version = version_str
+                
+                # Handle Java 9+ version format (major version only)
+                if int(major_version) > 8:
+                    major_version = str(int(major_version))
+                
+                if major_version in self.java_versions:
+                    self.java_combo.setCurrentText(major_version)
+                    return
+            
+            # If we get here, Java is installed but version couldn't be determined
+            self.show_error("Java installation found but version could not be determined")
+            
+        except Exception:
+            # Java command not found
             self.show_error("Java runtime not found! Install Java 8+ first.")
-            self.java_combo.setEnabled(False)
+        
+        # Fallback to first Java version in the list
+        self.java_combo.setCurrentIndex(0)
 
     def refresh_file_view(self):
         if self.current_server:
             self.file_view.setRootIndex(self.file_model.index(
                 self.servers[self.current_server]['path']
             ))
-
-    def validate_server_name(self, name):
-        if not name.strip():
-            raise ValueError("Server name cannot be empty!")
-        if re.search(r'[<>:"/\\|?*]', name):
-            raise ValueError("Invalid characters in server name!")
-        if len(name) > 32:
-            raise ValueError("Server name too long (max 32 characters)")
-        if name.lower() in [n.lower() for n in self.servers]:
-            raise ValueError("Server name already exists (case-insensitive)")
 
     def load_profiles(self):
         try:
@@ -888,8 +973,7 @@ class ServerManager(QMainWindow):
                     self.servers = json.load(f)
                     for server in self.servers.values():
                         server['thread'] = None
-                        # Reset status to STOPPED on app start
-                        server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                        server['status'] = Constants.SERVER_STATUS["STOPPED"] 
                     self.update_server_list()
         except Exception as e:
             self.show_error(f"Failed to load profiles: {str(e)}")
@@ -910,24 +994,57 @@ class ServerManager(QMainWindow):
                     encrypted = f.read()
                     self.api_keys = json.loads(self.secure_settings.decrypt(encrypted))
                     self.curseforge_key_input.setText(self.api_keys.get('curseforge', ''))
+                    self.update_java_path_model()
         except Exception as e:
             logging.error(f"Secure load failed: {str(e)}")
     
     def save_api_keys(self):
-        """Save API keys securely using encryption"""
+        self.api_keys['curseforge'] = self.curseforge_key_input.text()
         try:
-            self.api_keys['curseforge'] = self.curseforge_key_input.text()
             encrypted = self.secure_settings.encrypt(json.dumps(self.api_keys))
             with open(Constants.FILES["SETTINGS"], 'w') as f:
                 f.write(encrypted)
-            self.statusBar().showMessage("API keys saved", 3000)
+            self.statusBar().showMessage("Settings saved", 3000)
         except Exception as e:
-            logging.error(f"API key save failed: {str(e)}")
-            QMessageBox.critical(self, "Error", "Failed to save API keys")
+            logging.error(f"Settings save failed: {str(e)}")
+            QMessageBox.critical(self, "Error", "Failed to save settings")
 
-    def setup_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_file_view)
-        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.close)
+    def update_java_path_model(self):
+        self.java_path_model.clear()
+        self.java_path_model.setHorizontalHeaderLabels(["Version", "Path"])
+        for version, path in self.api_keys.get('java_paths', {}).items():
+            version_item = QStandardItem(version)
+            path_item = QStandardItem(path)
+            self.java_path_model.appendRow([version_item, path_item])
+
+    def add_java_path(self):
+        version, ok1 = QInputDialog.getText(self, "Java Version", "Enter Java version (e.g., 8, 11, 17):")
+        if not ok1 or not version:
+            return
+            
+        path, ok2 = QFileDialog.getOpenFileName(
+            self, "Select Java Executable", 
+            "/usr/bin" if platform.system() != "Windows" else "C:\\Program Files\\Java",
+            "Executable Files (*.exe)" if platform.system() == "Windows" else ""
+        )
+        if not ok2 or not path:
+            return
+            
+        self.api_keys.setdefault('java_paths', {})[version] = path
+        self.update_java_path_model()
+
+    def remove_java_path(self):
+        selected = self.java_path_table.selectionModel().selectedIndexes()
+        if not selected:
+            return
+            
+        row = selected[0].row()
+        version_item = self.java_path_model.item(row, 0)
+        if version_item:
+            version = version_item.text()
+            if version in self.api_keys.get('java_paths', {}):
+                del self.api_keys['java_paths'][version]
+                self.update_java_path_model()
 
     def show_info(self, message):
         QMessageBox.information(self, "Success", message)
@@ -940,43 +1057,6 @@ class ServerManager(QMainWindow):
     def show_search_error(self, message):
         self.progress.hide()
         self.show_error(f"Search error: {message}")
-
-    def download_file(self, url, path):
-        try:
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-                os.replace(tmp.name, path)
-            return path
-        except Exception as e:
-            self.show_error(f"Download failed: {str(e)}")
-            raise
-
-    def cleanup_server_dir(self, path):
-        try:
-            if os.path.exists(path):
-                if platform.system() == "Windows":
-                    subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', path], check=True)
-                else:
-                    subprocess.run(["rm", "-rf", path], check=True)
-        except Exception as e:
-            self.show_error(f"Cleanup failed: {str(e)}")
-
-    def closeEvent(self, event):
-        # Stop any running image loaders
-        for loader in self.current_image_loaders:
-            if loader.isRunning():
-                loader.quit()
-                
-        # Stop the server status monitor
-        self.status_timer.stop()
-        
-        # Save data
-        self.save_profiles()
-        self.save_api_keys()
-        event.accept()
 
     def select_server_directory(self):
         path = QFileDialog.getExistingDirectory(
@@ -993,35 +1073,29 @@ class ServerManager(QMainWindow):
         name, ok = QInputDialog.getText(self, "Server Name", "Enter server name:")
         if ok and name:
             try:
-                self.validate_server_name(name)
                 self.setup_server(name)
             except ValueError as e:
                 self.show_error(str(e))
 
     def setup_server(self, name):
-        # Get base directory from input field
         base_dir = self.server_path.text()
         if not base_dir:
             base_dir = QDir.homePath()
-
-        # Create server directory
-        server_dir = os.path.join(base_dir, name)
-
+        
+        # Sanitize and create directory
+        sanitized_name = sanitize_filename(name)
+        server_dir = os.path.join(base_dir, sanitized_name)
+        
         try:
-            # Create directory with proper permissions
             os.makedirs(server_dir, exist_ok=True)
             if platform.system() != "Windows":
                 os.chmod(server_dir, 0o755)
-
+                
             loader = self.loader_combo.currentText()
             version = self.version_combo.currentText()
-
             jar_path = os.path.join(server_dir, Constants.FILES["SERVER_JAR"])
 
-            # Use the robust downloader
             downloader = FileDownloader()
-
-            # Download server JAR based on loader
             if loader == "Vanilla":
                 downloader.download_file(self.get_vanilla_url(version), jar_path)
             elif loader == "Paper":
@@ -1029,42 +1103,32 @@ class ServerManager(QMainWindow):
             else:
                 raise ValueError(f"Unsupported loader: {loader}")
 
-            # Generate secure RCON password
-            rcon_password = secrets.token_urlsafe(16)
-
-            # Create server configuration files WITH PASSWORD
-            self.create_server_properties(server_dir, rcon_password)
+            self.create_server_properties(server_dir)
             self.create_eula_file(server_dir)
 
-            # Save server profile with encrypted password
             self.servers[name] = {
                 "path": server_dir,
+                "loader": loader,
                 "status": Constants.SERVER_STATUS["STOPPED"],
                 "max_ram": "2G",
                 "mc_version": version,
-                "rcon_password": self.secure_settings.encrypt(rcon_password),
                 "thread": None
             }
             self.save_profiles()
             self.update_server_list()
-
-            # Add to server list and select
             self.current_server = name
             self.file_model.setRootPath(server_dir)
             self.file_view.setRootIndex(self.file_model.index(server_dir))
-
+            self.load_server_properties()
             self.show_info(f"Server '{name}' created successfully!")
-
+            
         except Exception as e:
             error_msg = f"Server creation failed: {str(e)}"
             logging.exception(error_msg)
             self.show_error(error_msg)
-
-            # Cleanup partial server directory
             if os.path.exists(server_dir):
                 try:
                     shutil.rmtree(server_dir, ignore_errors=True)
-                    logging.info(f"Cleaned up partial server directory: {server_dir}")
                 except Exception as cleanup_error:
                     logging.error(f"Cleanup failed: {str(cleanup_error)}")
 
@@ -1082,22 +1146,14 @@ class ServerManager(QMainWindow):
                 response = requests.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"], timeout=10)
                 versions = [v['id'] for v in response.json()['versions'] if v['type'] == 'release']
             elif loader_name == "Paper":
-                # Get available Paper versions from API
                 response = requests.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"], timeout=10)
                 paper_data = response.json()
-
-                if 'versions' not in paper_data:
-                    raise ValueError("Invalid PaperMC API response")
-
-                # Filter valid versions (e.g., "1.20.4" but not "1.20.4-R0.1-SNAPSHOT")
                 valid_versions = [
                     v for v in reversed(paper_data['versions'])
-                    if re.match(r'^\d+\.\d+\.\d+$', v)  # Only X.X.X format
+                    if re.match(r'^\d+\.\d+\.\d+$', v)
                 ]
-
                 if not valid_versions:
                     raise ValueError("No stable Paper versions available")
-
                 versions = valid_versions
             else:
                 versions = ["Version selection not implemented"]
@@ -1120,86 +1176,48 @@ class ServerManager(QMainWindow):
         raise ValueError("Version not found")
 
     def get_paper_url(self, version):
-        """Get PaperMC download URL with debug logging"""
         try:
-            # ------------------------------------------------------------------
-            # Step 1: Get build list
-            # ------------------------------------------------------------------
             builds_url = f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/versions/{version}/builds"
-            print(f"[DEBUG] Fetching builds from: {builds_url}")
-            
             response = requests.get(builds_url, timeout=10)
             response.raise_for_status()
             builds_data = response.json()
-            
-            print(f"[DEBUG] Received {len(builds_data.get('builds', []))} builds for version {version}")
     
-            # ------------------------------------------------------------------
-            # Step 2: Validate builds
-            # ------------------------------------------------------------------
             if not builds_data.get('builds'):
-                print(f"[ERROR] No builds found in response for version {version}")
                 raise ValueError(f"No builds available for PaperMC {version}")
     
-            # ------------------------------------------------------------------
-            # Step 3: Extract build details
-            # ------------------------------------------------------------------
             latest_build = builds_data['builds'][-1]
-            print(f"[DEBUG] Latest build details: {json.dumps(latest_build, indent=2)}")
-    
             build_number = latest_build['build']
             downloads_data = latest_build['downloads']['application']
             filename = downloads_data['name']
             
-            print(f"[DEBUG] Extracted values:")
-            print(f"  - Version:    {version}")
-            print(f"  - Build:      {build_number}")
-            print(f"  - File name:  {filename}")
-    
-            # ------------------------------------------------------------------
-            # Step 4: Construct final URL
-            # ------------------------------------------------------------------
-            download_url = (
+            return (
                 f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/"
                 f"versions/{version}/"
                 f"builds/{build_number}/"
                 f"downloads/{filename}"
             )
-            print(f"[DEBUG] Constructed download URL: {download_url}")
-            
-            return download_url
-    
         except requests.exceptions.HTTPError as e:
-            print(f"[HTTP ERROR] Status: {e.response.status_code}")
-            print(f"[HTTP ERROR] URL: {e.response.url}")
             if e.response.status_code == 404:
                 raise ValueError(f"PaperMC version {version} not found")
             raise ValueError(f"API request failed: {str(e)}")
         except KeyError as e:
-            print(f"[KEY ERROR] Missing field in API response: {str(e)}")
-            print(f"[KEY ERROR] Response data: {json.dumps(builds_data, indent=2)}")
             raise ValueError(f"Missing required field in API response: {str(e)}")
         except json.JSONDecodeError:
-            print(f"[JSON ERROR] Invalid response from: {builds_url}")
-            print(f"[JSON ERROR] Response text: {response.text[:200]}...")
             raise ValueError("Invalid JSON response from PaperMC API")
 
     def update_server_list(self):
         self.server_list.clear()
         for server_name, data in self.servers.items():
             item = QListWidgetItem(server_name)
-            
-            # Set color based on status
             status = data.get('status', Constants.SERVER_STATUS["STOPPED"])
             if status == Constants.SERVER_STATUS["RUNNING"]:
                 item.setForeground(Qt.green)
             elif status == Constants.SERVER_STATUS["STARTING"]:
                 item.setForeground(Qt.yellow)
             elif status == Constants.SERVER_STATUS["STOPPING"]:
-                item.setForeground(QColor(255, 165, 0))  # Orange
-            else:  # STOPPED
+                item.setForeground(QColor(255, 165, 0))
+            else:
                 item.setForeground(Qt.red)
-                
             self.server_list.addItem(item)
 
     def select_server(self, item):
@@ -1208,181 +1226,208 @@ class ServerManager(QMainWindow):
             server_data = self.servers[self.current_server]
             self.file_model.setRootPath(server_data['path'])
             self.file_view.setRootIndex(self.file_model.index(server_data['path']))
-
-            # Clear console when switching servers
             self.console_output.clear()
+            self.console_buffer = []
+            self.load_server_properties()
+
+    def on_tab_changed(self, index):
+        if self.tabs.tabText(index) == "Console":
+            self.command_input.setFocus()
 
     def send_command(self):
-        """Send the command from the input field to the server directly"""
         cmd = self.command_input.text().strip()
         if not cmd or not self.current_server:
             return
-
+            
+        # Sanitize command input
+        cmd = sanitize_command(cmd)
         server = self.servers[self.current_server]
-
-        if server['thread'] and server['status'] == Constants.SERVER_STATUS["RUNNING"]:
-            if server['thread'].send_command(cmd):
-                # Echo the command to console
-                self.console_output.append(f"> {cmd}")
+        
+        if server['status'] == Constants.SERVER_STATUS["RUNNING"]:
+            if server['thread'] and server['thread'].send_command(cmd):
+                self.console_buffer.append(f"> {cmd}")
+                self.update_console_display()
                 self.command_input.clear()
             else:
                 self.show_error("Failed to send command to server process")
         else:
             self.show_error("Server is not running")
 
+    def update_console_display(self):
+        self.console_output.setPlainText("\n".join(self.console_buffer[-Constants.MAX_CONSOLE_LINES:]))
+        self.console_output.verticalScrollBar().setValue(
+            self.console_output.verticalScrollBar().maximum()
+        )
+        self.console_update_timer.stop()
+
     def update_server_status(self):
-        """Check actual server process status and update UI"""
         if not self.current_server:
             return
             
         server = self.servers[self.current_server]
         path = server['path']
         
-        # For STARTING servers, only check if process is still running
         if server.get('status') == Constants.SERVER_STATUS["STARTING"]:
             if not self.is_server_process_running(path):
-                # Process died during startup
                 server['status'] = Constants.SERVER_STATUS["STOPPED"]
                 self.update_server_list()
                 self.statusBar().showMessage("Server failed to start", 5000)
-        
-        # For RUNNING servers, check if process is still alive
         elif server.get('status') == Constants.SERVER_STATUS["RUNNING"]:
             if not self.is_server_process_running(path):
                 server['status'] = Constants.SERVER_STATUS["STOPPED"]
                 self.update_server_list()
                 self.statusBar().showMessage("Server stopped unexpectedly", 5000)
+        elif server.get('status') == Constants.SERVER_STATUS["STOPPING"]:
+            if not self.is_server_process_running(path):
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.update_server_list()
+                self.statusBar().showMessage("Server stopped", 3000)
 
     def is_server_process_running(self, server_path):
-        """Check if server process is actually running"""
+        pid_file = os.path.join(server_path, Constants.FILES["PID_FILE"])
+        if not os.path.exists(pid_file):
+            return False
+            
         try:
-            jar_path = os.path.join(server_path, Constants.FILES["SERVER_JAR"])
+            with open(pid_file, 'r') as f:
+                pid = int(f.read().strip())
             
             if platform.system() == "Windows":
                 result = subprocess.run(
-                    ['wmic', 'process', 'where', f'commandline like "%{jar_path}%"', 'get', 'processid'],
-                    capture_output=True,
+                    f'tasklist /FI "PID eq {pid}"', 
+                    capture_output=True, 
                     text=True,
-                    check=True
+                    shell=True
                 )
-                return "ProcessId" in result.stdout
+                return str(pid) in result.stdout
             else:
-                result = subprocess.run(
-                    ['pgrep', '-f', jar_path],
-                    capture_output=True,
-                    text=True
-                )
-                return result.returncode == 0
+                return os.path.exists(f"/proc/{pid}")
         except Exception:
             return False
 
     def start_server(self):
         if not self.current_server:
             return
-
+        
         server = self.servers[self.current_server]
         if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
             try:
-                java_path = "java.exe" if platform.system() == "Windows" else "java"
                 jar_path = os.path.join(server['path'], Constants.FILES["SERVER_JAR"])
-
-                # Check if server jar exists
                 if not os.path.exists(jar_path):
                     raise FileNotFoundError(f"Server JAR not found at {jar_path}")
-
+                
+                # Get configured Java path or default
+                java_version = server.get('java_version', self.java_combo.currentText())
+                java_path = self.api_keys.get('java_paths', {}).get(java_version, "java")
+                
                 command = [
                     java_path,
                     f"-Xmx{server.get('max_ram', '2G')}",
                     "-jar",
-                    f'"{jar_path}"' if " " in jar_path else jar_path,  # Quote path if contains spaces
+                    jar_path,
                     "nogui"
                 ]
-
+                
                 # Log the command for debugging
                 logging.info(f"Starting server with command: {' '.join(command)}")
-
-                server['thread'] = ServerThread(command, server['path'])
+                
+                server['thread'] = ServerThread(command, server['path'], java_path)
                 server['thread'].output.connect(self.handle_server_output)
                 server['thread'].stopped.connect(self.handle_server_stop)
                 server['thread'].error.connect(self.handle_thread_error)
                 server['thread'].start()
-
+                
                 # Update status to STARTING
                 server['status'] = Constants.SERVER_STATUS["STARTING"]
                 self.save_profiles()
                 self.update_server_list()
-
-                # Show persistent starting message
                 self.statusBar().showMessage("Server starting...")
-
+                
+                # Set start time and start timeout timer (2 minutes)
+                self.server_start_time = time.time()
+                self.start_timeout_timer = QTimer(self)
+                self.start_timeout_timer.timeout.connect(self.check_start_timeout)
+                self.start_timeout_timer.start(120000)  # 120,000 ms = 2 minutes
+                
             except Exception as e:
                 server['status'] = Constants.SERVER_STATUS["STOPPED"]
                 self.show_error(f"Start failed: {str(e)}")
+                logging.error(f"Start failed: {str(e)}")
+
+    def check_start_timeout(self):
+        """Check if server start has timed out"""
+        if self.current_server:
+            server = self.servers[self.current_server]
+            if server['status'] == Constants.SERVER_STATUS["STARTING"]:
+                # If still in starting state after timeout, mark as stopped
+                elapsed = time.time() - self.server_start_time
+                logging.warning(f"Server start timed out after {elapsed:.1f} seconds")
+                
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.save_profiles()
+                self.update_server_list()
+                self.statusBar().showMessage("Server start timed out", 5000)
+                
+                # Stop the server thread if it exists
+                if server.get('thread'):
+                    server['thread'].stop()
 
     def handle_server_output(self, message):
-        try:
-            # Append message to console
-            self.console_output.append(message)
-
-            if self.current_server:
-                server = self.servers[self.current_server]
-                status = server['status']
-
-                # Only process status changes if server is starting
-                if status == Constants.SERVER_STATUS["STARTING"]:
-                    # Check for server type and ready messages
-                    if "paper" in server['path'].lower() or "paper" in server.get('loader', '').lower():
-                        # PaperMC ready detection
-                        if "Listening on" in message and "has started" in message:
-                            server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                            self.save_profiles()
-                            self.update_server_list()
-                            self.statusBar().showMessage("PaperMC server is running", 3000)
-
-                    elif "vanilla" in server['path'].lower() or "vanilla" in server.get('loader', '').lower():
-                        # Vanilla ready detection
-                        if "Done (" in message and ")! For help, type \"help\"" in message:
-                            server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                            self.save_profiles()
-                            self.update_server_list()
-                            self.statusBar().showMessage("Vanilla server is running", 3000)
-
-                    else:
-                        # Generic ready detection for other server types
-                        if "Preparing spawn area" in message:
-                            server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                            self.save_profiles()
-                            self.update_server_list()
-                            self.statusBar().showMessage("Server is running", 3000)
-
-            # Error detection
+        self.console_buffer.append(message)
+        if not self.console_update_timer.isActive():
+            self.console_update_timer.start(500)
+        
+        if self.current_server:
+            server = self.servers[self.current_server]
+            
+            # Create a combined view of the last few messages
+            recent_messages = "\n".join(self.console_buffer[-5:])
+            
+            if server['status'] == Constants.SERVER_STATUS["STARTING"]:
+                loader = server.get('loader', '').lower()
+                
+                # Check using combined recent messages
+                if "paper" in loader:
+                    # Paper server ready when we see both parts of the completion message
+                    if "Done (" in recent_messages and "! For help, type \"help\"" in recent_messages:
+                        server['status'] = Constants.SERVER_STATUS["RUNNING"]
+                        self.save_profiles()
+                        self.update_server_list()
+                        self.statusBar().showMessage("Server is running", 3000)
+                        
+                # For other server types, keep the original single-line detection
+                else:
+                    ready_phrases = {
+                        "vanilla": "Done (",
+                        "spigot": "Done (",
+                        "fabric": "Listening on",
+                        "forge": "Forge Mod Loader version",
+                        "quilt": "Quilt Mod Loader version",
+                        "mohist": "MinecraftForge"
+                    }
+                    phrase = ready_phrases.get(loader)
+                    if phrase and phrase in message:
+                        server['status'] = Constants.SERVER_STATUS["RUNNING"]
+                        self.save_profiles()
+                        self.update_server_list()
+                        self.statusBar().showMessage("Server is running", 3000)
+            
+            # Error detection (remains single-line based)
             if any(e in message for e in ["ERROR", "Exception", "Crash"]):
                 logging.error(f"Server Error: {message}")
-
-                # If we're in STARTING state and see an error, mark as failed
-                if self.current_server and server['status'] == Constants.SERVER_STATUS["STARTING"]:
+                if server['status'] == Constants.SERVER_STATUS["STARTING"]:
                     server['status'] = Constants.SERVER_STATUS["STOPPED"]
                     self.save_profiles()
                     self.update_server_list()
                     self.statusBar().showMessage("Server failed to start", 5000)
 
-            # Line limit management
-            if self.console_output.document().lineCount() > Constants.MAX_CONSOLE_LINES:
-                cursor = self.console_output.textCursor()
-                cursor.movePosition(cursor.Start)
-                cursor.select(cursor.LineUnderCursor)
-                cursor.removeSelectedText()
-        except Exception as e:
-            logging.error(f"Output handling error: {str(e)}")
-
     def handle_thread_error(self, message):
-        """Handle errors from server thread"""
         if self.current_server:
             server = self.servers[self.current_server]
             server['status'] = Constants.SERVER_STATUS["STOPPED"]
             self.update_server_list()
             self.show_error(f"Server error: {message}")
-            logging.error(f"Server error: {message}")
+            logging.error(f"Server thread error: {message}")
 
     def handle_server_stop(self):
         if self.current_server:
@@ -1401,17 +1446,14 @@ class ServerManager(QMainWindow):
             try:
                 server = self.servers[self.current_server]
                 if server['thread']:
-                    # Let the thread handle the stop command
                     server['thread'].stop()
-
-                # Update status to STOPPING
                 server['status'] = Constants.SERVER_STATUS["STOPPING"]
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Stopping server...")
             except Exception as e:
                 self.show_error(f"Stop failed: {str(e)}")
-                
+
     def delete_server(self):
         if not self.current_server:
             return
@@ -1425,10 +1467,7 @@ class ServerManager(QMainWindow):
             server_path = self.servers[self.current_server]['path']
             try:
                 if os.path.exists(server_path):
-                    if platform.system() == "Windows":
-                        subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', server_path], check=True)
-                    else:
-                        subprocess.run(["rm", "-rf", server_path], check=True)
+                    shutil.rmtree(server_path, ignore_errors=True)
                 del self.servers[self.current_server]
                 self.current_server = None
                 self.save_profiles()
@@ -1460,135 +1499,160 @@ class ServerManager(QMainWindow):
             except Exception as e:
                 self.show_error(f"Open failed: {str(e)}")
 
-    def create_server_properties(self, server_dir, rcon_password):
-        """Create default server.properties file with RCON password"""
+    def create_server_properties(self, server_dir):
         properties_path = os.path.join(server_dir, "server.properties")
+        with open(properties_path, 'w') as f:
+            f.write("# Minecraft server properties\n")
+            f.write("enable-jmx-monitoring=false\n")
+            f.write("rcon.port=25575\n")
+            f.write("enable-rcon=false\n")
+            f.write("level-seed=\n")
+            f.write("enable-command-block=false\n")
+            f.write("gamemode=survival\n")
+            f.write("enable-query=false\n")
+            f.write("generator-settings={}\n")
+            f.write("level-name=world\n")
+            f.write("motd=A Minecraft Server\n")
+            f.write("query.port=25565\n")
+            f.write("pvp=true\n")
+            f.write("generate-structures=true\n")
+            f.write("difficulty=normal\n")
+            f.write("network-compression-threshold=256\n")
+            f.write("max-tick-time=60000\n")
+            f.write("require-resource-pack=false\n")
+            f.write("use-native-transport=true\n")
+            f.write("max-players=20\n")
+            f.write("online-mode=false\n")
+            f.write("enable-status=true\n")
+            f.write("allow-flight=false\n")
+            f.write("broadcast-rcon-to-ops=true\n")
+            f.write("view-distance=16\n")
+            f.write("server-ip=\n")
+            f.write("resource-pack-prompt=\n")
+            f.write("allow-nether=true\n")
+            f.write("server-port=25565\n")
+            f.write("sync-chunk-writes=true\n")
+            f.write("op-permission-level=4\n")
+            f.write("prevent-proxy-connections=false\n")
+            f.write("hide-online-players=false\n")
+            f.write("resource-pack=\n")
+            f.write("entity-broadcast-range-percentage=100\n")
+            f.write("simulation-distance=16\n")
+            f.write("player-idle-timeout=0\n")
+            f.write("debug=false\n")
+            f.write("force-gamemode=true\n")
+            f.write("rate-limit=0\n")
+            f.write("hardcore=false\n")
+            f.write("white-list=false\n")
+            f.write("broadcast-console-to-ops=true\n")
+            f.write("spawn-npcs=true\n")
+            f.write("spawn-animals=true\n")
+            f.write("snooper-enabled=true\n")
+            f.write("function-permission-level=2\n")
+            f.write("level-type=default\n")
+            f.write("text-filtering-config=\n")
+            f.write("spawn-monsters=true\n")
+            f.write("enforce-whitelist=false\n")
+            f.write("resource-pack-sha1=\n")
+            f.write("spawn-protection=0\n")
+            f.write("max-world-size=29999984\n")
+
+    def load_server_properties(self):
+        if not self.current_server:
+            return
+            
+        server = self.servers[self.current_server]
+        prop_file = os.path.join(server['path'], "server.properties")
+        
+        if os.path.exists(prop_file):
+            try:
+                with open(prop_file, 'r') as f:
+                    self.properties_editor.setPlainText(f.read())
+            except Exception as e:
+                self.show_error(f"Failed to load properties: {str(e)}")
+
+    def save_server_properties(self):
+        if not self.current_server:
+            return
+            
+        server = self.servers[self.current_server]
+        prop_file = os.path.join(server['path'], "server.properties")
+        
         try:
-            with open(properties_path, 'w') as f:
-                f.write("# Minecraft server properties\n")
-                f.write("enable-jmx-monitoring=false\n")
-                f.write("rcon.port=25575\n")
-                f.write("enable-rcon=true\n")  # Enable RCON by default
-                f.write(f"rcon.password={rcon_password}\n")  # Add password here
-                f.write("level-seed=\n")
-                f.write("enable-command-block=false\n")
-                f.write("gamemode=survival\n")
-                f.write("enable-query=false\n")
-                f.write("generator-settings={}\n")
-                f.write("level-name=world\n")
-                f.write("motd=A Minecraft Server\n")
-                f.write("query.port=25565\n")
-                f.write("pvp=true\n")
-                f.write("generate-structures=true\n")
-                f.write("difficulty=normal\n")
-                f.write("network-compression-threshold=256\n")
-                f.write("max-tick-time=60000\n")
-                f.write("require-resource-pack=false\n")
-                f.write("use-native-transport=true\n")
-                f.write("max-players=20\n")
-                f.write("online-mode=false\n")
-                f.write("enable-status=true\n")
-                f.write("allow-flight=false\n")
-                f.write("broadcast-rcon-to-ops=true\n")
-                f.write("view-distance=16\n")
-                f.write("server-ip=\n")
-                f.write("resource-pack-prompt=\n")
-                f.write("allow-nether=true\n")
-                f.write("server-port=25565\n")
-                f.write("sync-chunk-writes=true\n")
-                f.write("op-permission-level=4\n")
-                f.write("prevent-proxy-connections=false\n")
-                f.write("hide-online-players=false\n")
-                f.write("resource-pack=\n")
-                f.write("entity-broadcast-range-percentage=100\n")
-                f.write("simulation-distance=16\n")
-                f.write("player-idle-timeout=0\n")
-                f.write("debug=false\n")
-                f.write("force-gamemode=true\n")
-                f.write("rate-limit=0\n")
-                f.write("hardcore=false\n")
-                f.write("white-list=false\n")
-                f.write("broadcast-console-to-ops=true\n")
-                f.write("spawn-npcs=true\n")
-                f.write("spawn-animals=true\n")
-                f.write("snooper-enabled=true\n")
-                f.write("function-permission-level=2\n")
-                f.write("level-type=default\n")
-                f.write("text-filtering-config=\n")
-                f.write("spawn-monsters=true\n")
-                f.write("enforce-whitelist=false\n")
-                f.write("resource-pack-sha1=\n")
-                f.write("spawn-protection=0\n")
-                f.write("max-world-size=29999984\n")
-            logging.info(f"Created server.properties at {properties_path}")
+            with open(prop_file, 'w') as f:
+                f.write(self.properties_editor.toPlainText())
+            self.statusBar().showMessage("Properties saved successfully", 3000)
         except Exception as e:
-            logging.error(f"Failed to create server.properties: {str(e)}")
-            raise
+            self.show_error(f"Failed to save properties: {str(e)}")
 
     def safe_mod_search(self):
         platform = self.mods_platform_combo.currentText()
         query = self.mod_search.text()
-        
         if not query:
             return
-            
         self.progress.show()
         self.statusBar().showMessage("Searching mods...")
-        
         try:
             if platform == "Modrinth":
                 server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
-                self.search_thread = ModSearchThread(query, server_version, self.loader_combo.currentText())
-                self.search_thread.finished.connect(lambda data: self.show_mods(self._format_modrinth_results(data)))
+                self.search_thread = ModSearchThread(
+                    query, 
+                    server_version, 
+                    self.loader_combo.currentText()
+                )
+                self.search_thread.finished.connect(self.show_mods)
             elif platform == "CurseForge":
                 if not self.api_keys.get('curseforge'):
                     self.show_error("CurseForge API key required!")
                     return
-                self.search_thread = CurseForgeSearchThread(query, 6, self.api_keys['curseforge'])
-                self.search_thread.finished.connect(lambda data: self.show_mods(self._format_curseforge_results(data)))
-            
+                self.search_thread = CurseForgeSearchThread(
+                    query, 
+                    6, 
+                    self.api_keys['curseforge']
+                )
+                self.search_thread.finished.connect(
+                    lambda data: self.show_mods(self._format_curseforge_results(data)))
             self.search_thread.error.connect(self.show_search_error)
             self.search_thread.start()
-        except Exception as e:
+        except Exception as e:  # Added the missing except clause
             self.progress.hide()
             self.show_error(f"Search failed: {str(e)}")
-
+            
     def safe_plugin_search(self):
         platform = self.plugins_platform_combo.currentText()
         query = self.plugin_search.text()
-        
         if not query:
             return
             
         self.progress.show()
         self.statusBar().showMessage("Searching plugins...")
         
-        try:
+        try:  # Added try-except block
             if platform == "CurseForge":
                 if not self.api_keys.get('curseforge'):
                     self.show_error("CurseForge API key required!")
                     return
-                self.search_thread = CurseForgeSearchThread(query, 5, self.api_keys['curseforge'])
-                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_curseforge_results(data)))
+                self.search_thread = CurseForgeSearchThread(
+                    query, 
+                    5, 
+                    self.api_keys['curseforge']
+                )
+                self.search_thread.finished.connect(
+                    lambda data: self.show_plugins(self._format_curseforge_results(data)))
             elif platform == "Modrinth":
                 server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
-                self.search_thread = ModSearchThread(query, server_version, "bukkit")
-                self.search_thread.finished.connect(lambda data: self.show_plugins(self._format_modrinth_results(data)))
+                self.search_thread = ModSearchThread(
+                    query, 
+                    server_version, 
+                    "bukkit"
+                )
+                self.search_thread.finished.connect(self.show_plugins)
             
             self.search_thread.error.connect(self.show_search_error)
             self.search_thread.start()
-        except Exception as e:
+        except Exception as e:  # Added except clause
             self.progress.hide()
             self.show_error(f"Search failed: {str(e)}")
-
-    def _format_modrinth_results(self, results):
-        return [{
-            'id': res['project_id'],
-            'title': res['title'],
-            'description': res.get('description', 'No description'),
-            'icon_url': res.get('icon_url'),
-            'versions': res['versions']
-        } for res in results]
 
     def _format_curseforge_results(self, results):
         return [{
@@ -1604,6 +1668,7 @@ class ServerManager(QMainWindow):
         for mod in mods:
             self.create_resource_card(mod, self.mod_list_layout, self.install_mod)
         self.mod_list_layout.addStretch()
+        self.progress.hide()
         self.statusBar().showMessage(f"Found {len(mods)} mods", 3000)
 
     def show_plugins(self, plugins):
@@ -1611,6 +1676,7 @@ class ServerManager(QMainWindow):
         for plugin in plugins:
             self.create_resource_card(plugin, self.plugin_list_layout, self.install_plugin)
         self.plugin_list_layout.addStretch()
+        self.progress.hide()
         self.statusBar().showMessage(f"Found {len(plugins)} plugins", 3000)
 
     def create_resource_card(self, data, layout, install_handler):
@@ -1630,13 +1696,17 @@ class ServerManager(QMainWindow):
         btn = QPushButton("Install")
         btn.clicked.connect(lambda _, d=data: install_handler(d))
         
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(lambda _, i=data.get('project_id', data.get('id')): self.cancel_image_load(i))
+        
         hbox.addWidget(icon)
         hbox.addLayout(text)
         hbox.addWidget(btn)
+        hbox.addWidget(cancel_btn)
         layout.addWidget(widget)
         
         if data.get('icon_url'):
-            self.load_item_icon(data['id'], data['icon_url'], icon)
+            self.load_item_icon(data.get('project_id', data.get('id')), data['icon_url'], icon)
 
     def load_item_icon(self, item_id, url, target_label):
         loader = ImageLoaderThread(url, item_id)
@@ -1647,6 +1717,12 @@ class ServerManager(QMainWindow):
 
     def update_icon(self, label, pixmap):
         label.setPixmap(pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def cancel_image_load(self, item_id):
+        for loader in self.current_image_loaders[:]:
+            if loader.item_id == item_id and loader.isRunning():
+                loader.quit()
+                self.current_image_loaders.remove(loader)
 
     def install_mod(self, mod):
         self.install_resource(mod, "mods")
@@ -1660,17 +1736,26 @@ class ServerManager(QMainWindow):
             return
         
         try:
+            versions = resource.get('versions', [])
+            if not versions:
+                self.show_error("No installable versions found")
+                return
+                
+            dialog = VersionSelectDialog(versions, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+                
+            version = dialog.selected_version()
             server_path = self.servers[self.current_server]['path']
             target_dir = os.path.join(server_path, target_type)
             os.makedirs(target_dir, exist_ok=True)
             
             if self.mods_platform_combo.currentText() == "Modrinth":
-                version = resource['versions'][0]
                 file = version['files'][0]
                 url = file['url']
                 filename = file['filename']
             else:
-                file = resource['versions'][0]
+                file = version
                 url = file['downloadUrl']
                 filename = file['fileName']
             
@@ -1684,7 +1769,8 @@ class ServerManager(QMainWindow):
                 if reply != QMessageBox.Yes:
                     return
             
-            self.download_file(url, dest_path)
+            downloader = FileDownloader()
+            downloader.download_file(url, dest_path)
             self.show_info(f"Installed {filename}")
         except Exception as e:
             self.show_error(f"Install failed: {str(e)}")
@@ -1696,8 +1782,6 @@ class ServerManager(QMainWindow):
                 widget.deleteLater()
 
     def start_url_install(self, target_type):
-        """Start URL installation process"""
-        # Get the URL input for the target type
         url_input = getattr(self, f"{target_type}_url_input")
         urls = url_input.toPlainText().split('\n')
         
@@ -1708,11 +1792,9 @@ class ServerManager(QMainWindow):
         server_path = self.servers[self.current_server]['path']
         api_key = self.api_keys.get('curseforge', '')
         
-        # Get progress UI elements
         progress_bar = getattr(self, f"{target_type}_progress")
         status_label = getattr(self, f"{target_type}_status")
         
-        # Create and configure thread
         self.install_thread = UrlInstallThread(urls, server_path, api_key, target_type)
         self.install_thread.progress.connect(
             lambda val, text: (progress_bar.setValue(val), status_label.setText(text))
@@ -1720,20 +1802,49 @@ class ServerManager(QMainWindow):
         self.install_thread.finished.connect(lambda: status_label.setText("Installation completed"))
         self.install_thread.error.connect(lambda err: status_label.setText(f"Error: {err}"))
         
-        # Reset UI and start thread
         progress_bar.setValue(0)
         status_label.setText("Starting installation...")
         self.install_thread.start()
 
+    def check_mod_updates(self):
+        if not self.current_server:
+            return
+            
+        self.show_info("Mod update check not fully implemented in this version")
+        # Full implementation would compare installed mods with latest versions
+
+    def closeEvent(self, event):
+        self.stop_all_threads()
+        self.status_timer.stop()
+        self.save_profiles()
+        self.save_api_keys()
+        event.accept()
+        
+    def stop_all_threads(self):
+        for server in self.servers.values():
+            if server.get('thread') and server['thread'].isRunning():
+                server['thread'].stop()
+                server['thread'].wait(5000)
+        
+        for loader in self.current_image_loaders[:]:
+            if loader.isRunning():
+                loader.quit()
+                loader.wait(1000)
+        
+        if hasattr(self, 'search_thread') and self.search_thread.isRunning():
+            self.search_thread.quit()
+            self.search_thread.wait(1000)
+            
+        if hasattr(self, 'install_thread') and self.install_thread.isRunning():
+            self.install_thread.quit()
+            self.install_thread.wait(1000)
+
+# =============================================================================
+# APPLICATION ENTRY POINT
+# =============================================================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     qdarktheme.setup_theme()
     window = ServerManager()
     window.show()
     sys.exit(app.exec())
-
-
-
-'''
-
-'''
