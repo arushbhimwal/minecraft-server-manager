@@ -10,11 +10,12 @@ import tempfile
 import platform
 import subprocess
 import logging
+import logging.handlers  # Added missing import
 import re
 import zipfile
 import secrets
 import signal
-import fnmatch  # Added missing import
+import fnmatch
 from datetime import datetime
 from functools import lru_cache
 from cryptography.fernet import Fernet
@@ -784,7 +785,7 @@ class ServerManager(QMainWindow):
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.handlers.RotatingFileHandler(
+                logging.handlers.RotatingFileHandler(  # Fixed handler reference
                     'server_manager.log',
                     maxBytes=5*1024*1024,  # 5 MB
                     backupCount=3,
