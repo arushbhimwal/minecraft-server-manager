@@ -67,6 +67,9 @@ class Constants:
     JAVA_VERSIONS = ['8', '11', '17', '21']
     LOADERS = ['Vanilla', 'Paper', 'Spigot', 'Forge', 'Fabric', 'Quilt', 'Mohist']
 
+# Enable/disable debug mode here
+DEBUG_MODE = True
+
 def sanitize_filename(name):
     """Remove potentially dangerous characters from filenames"""
     return re.sub(r'[\\/*?:"<>|]', "", name)
@@ -453,6 +456,10 @@ class ServerThread(QThread):
             # Use the configured Java path
             full_command = [self.java_path] + self.command[1:]
             
+            if DEBUG_MODE:
+                print(f"[DEBUG] Starting server with command: {' '.join(full_command)}")
+                print(f"[DEBUG] Working directory: {self.cwd}")
+            
             if platform.system() == "Windows":
                 command_str = " ".join(full_command)
                 self.process = subprocess.Popen(
@@ -483,14 +490,23 @@ class ServerThread(QThread):
             with open(pid_file, 'w') as f:
                 f.write(str(self.process.pid))
                 
+            if DEBUG_MODE:
+                print(f"[DEBUG] Server process started with PID: {self.process.pid}")
+                
             while self.running:
                 output = self.process.stdout.readline()
                 if output:
+                    if DEBUG_MODE:
+                        print(f"[SERVER OUTPUT] {output.strip()}")
                     self.output.emit(output.strip())
                 if self.process.poll() is not None:
+                    if DEBUG_MODE:
+                        print(f"[DEBUG] Server process exited with code: {self.process.poll()}")
                     break
         except Exception as e:
             self.error.emit(f"Server thread error: {str(e)}")
+            if DEBUG_MODE:
+                print(f"[DEBUG] Server thread exception: {str(e)}")
         finally:
             self.stopped.emit()
 
@@ -508,18 +524,28 @@ class ServerThread(QThread):
         self.running = False
         if self.process:
             try:
+                if DEBUG_MODE:
+                    print("[DEBUG] Stopping server process...")
                 self.send_command("stop")
                 if not self.wait_for_stop(30):
+                    if DEBUG_MODE:
+                        print("[DEBUG] Process did not stop, terminating...")
                     self.process.terminate()
                     if not self.wait_for_stop(5):
+                        if DEBUG_MODE:
+                            print("[DEBUG] Process did not terminate, killing...")
                         self.process.kill()
             except Exception as e:
                 self.error.emit(f"Error stopping process: {str(e)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Error stopping process: {str(e)}")
             finally:
                 pid_file = os.path.join(self.cwd, Constants.FILES["PID_FILE"])
                 if os.path.exists(pid_file):
                     try:
                         os.remove(pid_file)
+                        if DEBUG_MODE:
+                            print("[DEBUG] Removed PID file")
                     except Exception:
                         pass
 
@@ -912,17 +938,18 @@ class ServerManager(QMainWindow):
             # Run java -version and capture output
             result = subprocess.run(
                 ['java', '-version'],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                stderr=subprocess.STDOUT
+                check=False
             )
             
-            # Get output from stdout or stderr
-            version_info = result.stdout or result.stderr
+            # Java -version outputs to stderr, so we combine both outputs
+            version_info = result.stderr or result.stdout
             
-            # DEBUG: Print Java version output to console and log file
-            print(f"Java version output: {repr(version_info)}")
-            logging.info(f"Java version output: {repr(version_info)}")
+            if DEBUG_MODE:
+                print(f"Java version output: {repr(version_info)}")
+                logging.info(f"Java version output: {repr(version_info)}")
             
             # Improved regex to handle all Java version formats
             version_match = re.search(
@@ -934,7 +961,9 @@ class ServerManager(QMainWindow):
             if version_match:
                 # Get the matched version string
                 version_str = version_match.group(1) or version_match.group(2)
-                print(f"Extracted version string: {version_str}")
+                
+                if DEBUG_MODE:
+                    print(f"Extracted version string: {version_str}")
                 
                 # Parse the major version number
                 if version_str.startswith("1."):
@@ -947,16 +976,20 @@ class ServerManager(QMainWindow):
                     parts = version_str.split('.')
                     major_version = parts[0]
                 
-                print(f"Extracted major version: {major_version}")
-                
                 # Clean up any non-digit characters
                 major_version = ''.join(filter(str.isdigit, major_version))
                 
+                if DEBUG_MODE:
+                    print(f"Extracted major version: {major_version}")
+                
                 if major_version in self.java_versions:
                     self.java_combo.setCurrentText(major_version)
+                    if DEBUG_MODE:
+                        print(f"Java version {major_version} selected")
                     return
                 else:
-                    print(f"Java version {major_version} not in supported list: {self.java_versions}")
+                    if DEBUG_MODE:
+                        print(f"Java version {major_version} not in supported list: {self.java_versions}")
             
             # If we get here, Java is installed but version couldn't be determined
             self.show_error("Java installation found but version could not be determined")
@@ -964,10 +997,13 @@ class ServerManager(QMainWindow):
         except Exception as e:
             # Java command not found
             self.show_error(f"Java runtime not found! Install Java 8+ first. Error: {str(e)}")
+            if DEBUG_MODE:
+                print(f"Java check error: {str(e)}")
         
         # Fallback to first Java version in the list
         self.java_combo.setCurrentIndex(0)
-        print("Falling back to default Java version")
+        if DEBUG_MODE:
+            print("Falling back to default Java version")
 
     def refresh_file_view(self):
         if self.current_server:
@@ -1339,6 +1375,8 @@ class ServerManager(QMainWindow):
                 
                 # Log the command for debugging
                 logging.info(f"Starting server with command: {' '.join(command)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Starting server: {' '.join(command)}")
                 
                 server['thread'] = ServerThread(command, server['path'], java_path)
                 server['thread'].output.connect(self.handle_server_output)
@@ -1351,17 +1389,23 @@ class ServerManager(QMainWindow):
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Server starting...")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Server status set to STARTING for {self.current_server}")
                 
                 # Set start time and start timeout timer (2 minutes)
                 self.server_start_time = time.time()
                 self.start_timeout_timer = QTimer(self)
                 self.start_timeout_timer.timeout.connect(self.check_start_timeout)
                 self.start_timeout_timer.start(120000)  # 120,000 ms = 2 minutes
+                if DEBUG_MODE:
+                    print("[DEBUG] Started server start timeout timer (2 minutes)")
                 
             except Exception as e:
                 server['status'] = Constants.SERVER_STATUS["STOPPED"]
                 self.show_error(f"Start failed: {str(e)}")
                 logging.error(f"Start failed: {str(e)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Server start failed: {str(e)}")
 
     def check_start_timeout(self):
         """Check if server start has timed out"""
@@ -1376,6 +1420,9 @@ class ServerManager(QMainWindow):
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Server start timed out", 5000)
+                
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Server start timed out after {elapsed:.1f} seconds")
                 
                 # Stop the server thread if it exists
                 if server.get('thread'):
@@ -1396,54 +1443,54 @@ class ServerManager(QMainWindow):
                 loader = server.get('loader', '').lower()
                 
                 # DEBUG: Print messages that might indicate server ready
-                if "Done" in message or "help" in message or "preparing" in message:
-                    print(f"STARTING SERVER MESSAGE: {message}")
+                if DEBUG_MODE and ("Done" in message or "help" in message or "preparing" in message):
+                    print(f"[DEBUG] STARTING SERVER MESSAGE: {message}")
                 
-                # Paper server ready detection
-                if "paper" in loader:
-                    # Check for both parts of the completion message in recent messages
-                    if "Done (" in recent_messages and "! For help, type \"help\"" in recent_messages:
-                        print("PAPER SERVER READY DETECTED")
+                # Check for any completion indicators
+                completion_indicators = [
+                    "Done (", 
+                    "! For help, type \"help\"",
+                    "For help, type \"help\"",
+                    "Listening on",
+                    "MinecraftForge",
+                    "Quilt Mod Loader version",
+                    "Forge Mod Loader version"
+                ]
+                
+                # Check both the current message and the last few messages combined
+                for indicator in completion_indicators:
+                    if indicator in recent_messages:
+                        if DEBUG_MODE:
+                            print(f"[DEBUG] SERVER READY DETECTED BY INDICATOR: {indicator}")
                         server['status'] = Constants.SERVER_STATUS["RUNNING"]
                         self.save_profiles()
                         self.update_server_list()
                         self.statusBar().showMessage("Server is running", 3000)
-                
-                # Vanilla server ready detection
-                elif "vanilla" in loader:
-                    if "Done (" in recent_messages and "! For help, type \"help\"" in recent_messages:
-                        print("VANILLA SERVER READY DETECTED")
-                        server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                        self.save_profiles()
-                        self.update_server_list()
-                        self.statusBar().showMessage("Server is running", 3000)
-                
-                # Generic detection for other server types
-                else:
-                    ready_phrases = {
-                        "spigot": "Done (",
-                        "fabric": "Listening on",
-                        "forge": "Forge Mod Loader version",
-                        "quilt": "Quilt Mod Loader version",
-                        "mohist": "MinecraftForge"
-                    }
-                    phrase = ready_phrases.get(loader)
-                    if phrase and phrase in message:
-                        print(f"{loader.upper()} SERVER READY DETECTED")
-                        server['status'] = Constants.SERVER_STATUS["RUNNING"]
-                        self.save_profiles()
-                        self.update_server_list()
-                        self.statusBar().showMessage("Server is running", 3000)
+                        
+                        # Stop the timeout timer
+                        if self.start_timeout_timer.isActive():
+                            self.start_timeout_timer.stop()
+                            if DEBUG_MODE:
+                                print("[DEBUG] Stopped server start timeout timer")
+                        break
             
             # Error detection
             if any(e in message for e in ["ERROR", "Exception", "Crash"]):
                 logging.error(f"Server Error: {message}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Server error detected: {message}")
+                    
                 if server['status'] == Constants.SERVER_STATUS["STARTING"]:
-                    print("SERVER START FAILED DUE TO ERROR")
+                    if DEBUG_MODE:
+                        print("[DEBUG] SERVER START FAILED DUE TO ERROR")
                     server['status'] = Constants.SERVER_STATUS["STOPPED"]
                     self.save_profiles()
                     self.update_server_list()
                     self.statusBar().showMessage("Server failed to start", 5000)
+                    
+                    # Stop the timeout timer
+                    if self.start_timeout_timer.isActive():
+                        self.start_timeout_timer.stop()
 
     def handle_thread_error(self, message):
         if self.current_server:
@@ -1452,6 +1499,8 @@ class ServerManager(QMainWindow):
             self.update_server_list()
             self.show_error(f"Server error: {message}")
             logging.error(f"Server thread error: {message}")
+            if DEBUG_MODE:
+                print(f"[DEBUG] Server thread error: {message}")
 
     def handle_server_stop(self):
         if self.current_server:
@@ -1461,6 +1510,8 @@ class ServerManager(QMainWindow):
             self.save_profiles()
             self.update_server_list()
             self.statusBar().showMessage("Server stopped", 3000)
+            if DEBUG_MODE:
+                print(f"[DEBUG] Server stopped: {self.current_server}")
 
     def stop_server(self):
         if self.current_server and self.servers[self.current_server]['status'] in [
@@ -1475,8 +1526,12 @@ class ServerManager(QMainWindow):
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Stopping server...")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Stopping server: {self.current_server}")
             except Exception as e:
                 self.show_error(f"Stop failed: {str(e)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Stop failed: {str(e)}")
 
     def delete_server(self):
         if not self.current_server:
@@ -1497,8 +1552,12 @@ class ServerManager(QMainWindow):
                 self.save_profiles()
                 self.update_server_list()
                 self.statusBar().showMessage("Server deleted", 3000)
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Deleted server: {server_path}")
             except Exception as e:
                 self.show_error(f"Delete failed: {str(e)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Delete failed: {str(e)}")
 
     def create_backup(self):
         if not self.current_server:
@@ -1845,6 +1904,9 @@ class ServerManager(QMainWindow):
         event.accept()
         
     def stop_all_threads(self):
+        if DEBUG_MODE:
+            print("[DEBUG] Stopping all threads...")
+            
         for server in self.servers.values():
             if server.get('thread') and server['thread'].isRunning():
                 server['thread'].stop()
@@ -1862,6 +1924,9 @@ class ServerManager(QMainWindow):
         if hasattr(self, 'install_thread') and self.install_thread.isRunning():
             self.install_thread.quit()
             self.install_thread.wait(1000)
+            
+        if DEBUG_MODE:
+            print("[DEBUG] All threads stopped")
 
 # =============================================================================
 # APPLICATION ENTRY POINT

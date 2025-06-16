@@ -22,3 +22,8 @@
 2025-06-15 19:18:43,332 - INFO - Starting server with command: java -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
 2025-06-15 19:20:43,342 - WARNING - Server start timed out after 120.0 seconds
 2025-06-15 19:21:27,590 - INFO - Starting server with command: java -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-16 11:47:19,662 - INFO - Starting server with command: C:/Program Files/Java/jdk-21/bin/java.exe -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-16 11:48:00,442 - INFO - Starting server with command: java -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-16 11:50:00,459 - WARNING - Server start timed out after 120.0 seconds
+2025-06-16 12:01:11,443 - INFO - Starting server with command: java -Xmx2G -jar C:/Users/HP/Desktop/Desktop/arush/servers\1\server.jar nogui
+2025-06-16 12:03:11,453 - WARNING - Server start timed out after 120.0 seconds
