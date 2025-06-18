@@ -18,11 +18,8 @@ import signal
 import fnmatch
 import hashlib
 import struct
-import fcntl
-import win32api
-import win32security
-import win32con
-import requests_cache
+import gzip  # Added gzip import
+import ctypes  # Added ctypes import
 from datetime import datetime
 from functools import lru_cache
 from collections import deque
@@ -34,7 +31,7 @@ from cryptography.hazmat.backends import default_backend
 import base64
 import prometheus_client
 from mcrcon import MCRcon
-from PySide6.QtCore import QTranslator, QLocale
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QTabWidget, QTextEdit,
@@ -43,11 +40,23 @@ from PySide6.QtWidgets import (
     QScrollArea, QFormLayout, QDialog, QDialogButtonBox, QGridLayout,
     QGroupBox, QCheckBox, QMenu, QAction, QSystemTrayIcon
 )
-from PySide6.QtGui import (QPixmap, QImage, QColor, QKeySequence, QShortcut, 
-                          QFont, QStandardItemModel, QStandardItem, QIcon)
-from PySide6.QtCore import (Qt, QThread, Signal, QDir, QTimer, QProcess, QMutex, 
-                           QWaitCondition, QSettings, QCoreApplication)
+from PySide6.QtGui import (
+    QPixmap, QImage, QColor, QKeySequence, QShortcut, 
+    QFont, QStandardItemModel, QStandardItem, QIcon
+)
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QDir, QTimer, QProcess, QMutex, 
+    QWaitCondition, QSettings, QCoreApplication, QTranslator, 
+    QLocale, QRunnable, QObject, QThreadPool  # Added required imports
+)
 import qdarktheme
+
+# =============================================================================
+# CUSTOM EXCEPTIONS
+# =============================================================================
+class SecurityError(Exception):
+    """Custom exception for security-related errors"""
+    pass
 
 # =============================================================================
 # CONSTANTS & SECURITY SETTINGS
@@ -975,13 +984,40 @@ class ServerManager(QMainWindow):
         
         # Start metrics server
         self.start_metrics_server()
+        
+        # Update role-based UI
+        self.update_role_based_ui()
 
-    def load_translations(self):
-        """Load translations based on system locale"""
-        locale = QLocale.system().name()
-        if self.translator.load(f"servermanager_{locale}", "translations"):
-            QCoreApplication.installTranslator(self.translator)
-
+    # ================================================
+    # INITIALIZATION AND SETUP METHODS
+    # ================================================
+    
+    def initialize_secure_settings(self):
+        """Initialize secure settings with password protection"""
+        try:
+            return SecureSettings()
+        except Exception as e:
+            password, ok = QInputDialog.getText(
+                self, "Encryption Password", 
+                "Enter password for settings decryption:",
+                QLineEdit.Password
+            )
+            if ok and password:
+                # Validate password complexity
+                if len(password) < 12 or not any(c.isdigit() for c in password):
+                    QMessageBox.critical(
+                        self, "Weak Password", 
+                        "Password must be at least 12 characters with at least one digit"
+                    )
+                    sys.exit(1)
+                return SecureSettings(password)
+            else:
+                QMessageBox.critical(
+                    self, "Encryption Error", 
+                    "Failed to initialize secure settings: " + str(e)
+                )
+                sys.exit(1)
+    
     def setup_logging(self):
         """Configure robust logging with rotation and JSON format"""
         class JsonFormatter(logging.Formatter):
@@ -1019,7 +1055,7 @@ class ServerManager(QMainWindow):
                     os.remove(log_file)
                 except Exception as e:
                     logging.error(f"Log compression failed: {str(e)}")
-
+    
     def start_metrics_server(self):
         """Start Prometheus metrics server"""
         try:
@@ -1027,7 +1063,7 @@ class ServerManager(QMainWindow):
             logging.info("Metrics server started on port 9090")
         except Exception as e:
             logging.error(f"Failed to start metrics server: {str(e)}")
-
+    
     def setup_system_tray(self):
         """Setup system tray icon with context menu"""
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -1046,37 +1082,13 @@ class ServerManager(QMainWindow):
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.tray_icon_activated)
-
-    def tray_icon_activated(self, reason):
-        if reason == QSystemTrayIcon.DoubleClick:
-            self.show()
-
-    def initialize_secure_settings(self):
-        """Initialize secure settings with password protection"""
-        try:
-            return SecureSettings()
-        except Exception as e:
-            password, ok = QInputDialog.getText(
-                self, "Encryption Password", 
-                "Enter password for settings decryption:",
-                QLineEdit.Password
-            )
-            if ok and password:
-                # Validate password complexity
-                if len(password) < 12 or not any(c.isdigit() for c in password):
-                    QMessageBox.critical(
-                        self, "Weak Password", 
-                        "Password must be at least 12 characters with at least one digit"
-                    )
-                    sys.exit(1)
-                return SecureSettings(password)
-            else:
-                QMessageBox.critical(
-                    self, "Encryption Error", 
-                    "Failed to initialize secure settings: " + str(e)
-                )
-                sys.exit(1)
-
+    
+    def load_translations(self):
+        """Load translations based on system locale"""
+        locale = QLocale.system().name()
+        if self.translator.load(f"servermanager_{locale}", "translations"):
+            QCoreApplication.installTranslator(self.translator)
+    
     def get_style_sheet(self):
         """Return UI styling with high-contrast option"""
         settings = QSettings()
@@ -1115,7 +1127,7 @@ class ServerManager(QMainWindow):
                 QTreeView { font-family: monospace; }
                 QScrollArea { background: transparent; }
             """
-
+    
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("Minecraft Server Manager")
@@ -1139,7 +1151,7 @@ class ServerManager(QMainWindow):
 
         self.setup_shortcuts()
         self.setup_menu()
-
+    
     def setup_menu(self):
         """Setup application menu"""
         menu_bar = self.menuBar()
@@ -1173,22 +1185,7 @@ class ServerManager(QMainWindow):
         help_menu = menu_bar.addMenu("Help")
         help_menu.addAction("Documentation")
         help_menu.addAction("About")
-
-    def toggle_high_contrast(self, checked):
-        """Toggle high contrast mode"""
-        settings = QSettings()
-        settings.setValue("high_contrast", checked)
-        self.setStyleSheet(self.get_style_sheet())
-
-    def open_user_manager(self):
-        """Open user management dialog"""
-        if self.user_role != Constants.USER_ROLES["ADMIN"]:
-            QMessageBox.warning(self, "Permission Denied", "Admin role required")
-            return
-            
-        dialog = UserManagerDialog(self)
-        dialog.exec()
-
+    
     def setup_server_list(self, layout):
         """Setup server list panel"""
         self.server_list = QListWidget()
@@ -1207,7 +1204,7 @@ class ServerManager(QMainWindow):
             btn = RoleBasedButton(text, required_role)
             btn.clicked.connect(handler)
             layout.addWidget(btn)
-
+    
     def setup_creation_form(self, layout):
         """Setup server creation form"""
         creation_layout = QHBoxLayout()
@@ -1247,7 +1244,7 @@ class ServerManager(QMainWindow):
         self.progress = QProgressBar()
         self.progress.hide()
         layout.addWidget(self.progress)
-
+    
     def setup_tabs(self, layout):
         """Setup main tabs"""
         self.tabs = QTabWidget()
@@ -1288,7 +1285,156 @@ class ServerManager(QMainWindow):
         self.tabs.addTab(update_tab, "Updates")
 
         layout.addWidget(self.tabs)
+    
+    def setup_console_tab(self, parent):
+        """Setup console tab"""
+        layout = QVBoxLayout(parent)
+        self.console_output = QTextEdit()
+        self.console_output.setReadOnly(True)
+        self.console_output.setFont(QFont("Courier New", 10))
+        
+        input_container = QWidget()
+        input_layout = QHBoxLayout(input_container)
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("Enter server command...")
+        self.command_input.returnPressed.connect(self.send_command)
+        
+        btn_send = QPushButton("Send")
+        btn_send.clicked.connect(self.send_command)
+        
+        input_layout.addWidget(self.command_input, 4)
+        input_layout.addWidget(btn_send, 1)
+        
+        layout.addWidget(self.console_output)
+        layout.addWidget(input_container)
+        self.command_input.setFocusPolicy(Qt.StrongFocus)
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(
+            lambda: self.command_input.setFocus()
+        )
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+    
+    def setup_file_tab(self, parent):
+        """Setup file browser tab"""
+        layout = QVBoxLayout(parent)
+        self.file_model = QFileSystemModel()
+        self.file_model.setRootPath(QDir.homePath())
+        self.file_view = QTreeView()
+        self.file_view.setModel(self.file_model)
+        self.file_view.doubleClicked.connect(self.open_file)
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self.refresh_file_view)
+        layout.addWidget(self.file_view)
+        layout.addWidget(btn_refresh)
+    
+    def setup_properties_tab(self, parent):
+        """Setup properties editor tab"""
+        layout = QVBoxLayout(parent)
+        self.properties_editor = QTextEdit()
+        self.properties_editor.setFont(QFont("Courier New", 10))
+        self.properties_editor.setPlaceholderText("server.properties content will appear here...")
+        
+        btn_save = QPushButton("Save Properties")
+        btn_save.clicked.connect(self.save_server_properties)
+        
+        layout.addWidget(QLabel("Edit server.properties:"))
+        layout.addWidget(self.properties_editor)
+        layout.addWidget(btn_save)
+    
+    def setup_mods_tab(self, parent):
+        """Setup mods management tab"""
+        layout = QVBoxLayout(parent)
+        layout.addLayout(self.create_url_section("mods"))
+        
+        platform_layout = QHBoxLayout()
+        self.mods_platform_combo = QComboBox()
+        self.mods_platform_combo.addItems(["Modrinth", "CurseForge"])
+        platform_layout.addWidget(QLabel("Source:"))
+        platform_layout.addWidget(self.mods_platform_combo)
+        layout.addLayout(platform_layout)
 
+        search_layout = QHBoxLayout()
+        self.mod_search = QLineEdit()
+        self.mod_search.setPlaceholderText("Search mods...")
+        btn_search = QPushButton("Search")
+        btn_search.clicked.connect(self.safe_mod_search)
+        search_layout.addWidget(self.mod_search)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.mod_list_container = QWidget()
+        self.mod_list_layout = QVBoxLayout(self.mod_list_container)
+        scroll.setWidget(self.mod_list_container)
+        layout.addWidget(scroll)
+        
+        btn_update = QPushButton("Check for Updates")
+        btn_update.clicked.connect(self.check_mod_updates)
+        layout.addWidget(btn_update)
+    
+    def setup_plugins_tab(self, parent):
+        """Setup plugins management tab"""
+        layout = QVBoxLayout(parent)
+        layout.addLayout(self.create_url_section("plugins"))
+        
+        platform_layout = QHBoxLayout()
+        self.plugins_platform_combo = QComboBox()
+        self.plugins_platform_combo.addItems(["CurseForge", "Modrinth"])
+        platform_layout.addWidget(QLabel("Source:"))
+        platform_layout.addWidget(self.plugins_platform_combo)
+        layout.addLayout(platform_layout)
+
+        search_layout = QHBoxLayout()
+        self.plugin_search = QLineEdit()
+        self.plugin_search.setPlaceholderText("Search plugins...")
+        btn_search = QPushButton("Search")
+        btn_search.clicked.connect(self.safe_plugin_search)
+        search_layout.addWidget(self.plugin_search)
+        search_layout.addWidget(btn_search)
+        layout.addLayout(search_layout)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.plugin_list_container = QWidget()
+        self.plugin_list_layout = QVBoxLayout(self.plugin_list_container)
+        scroll.setWidget(self.plugin_list_container)
+        layout.addWidget(scroll)
+    
+    def setup_settings_tab(self, parent):
+        """Setup settings tab"""
+        layout = QGridLayout(parent)
+        
+        # API Key Section
+        layout.addWidget(QLabel("CurseForge API Key:"), 0, 0)
+        self.curseforge_key_input = QLineEdit()
+        self.curseforge_key_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.curseforge_key_input, 0, 1)
+        
+        # Java Path Configuration
+        layout.addWidget(QLabel("Java Paths:"), 1, 0, 1, 2)
+        
+        self.java_path_table = QTreeView()
+        self.java_path_model = QStandardItemModel()
+        self.java_path_model.setHorizontalHeaderLabels(["Version", "Path"])
+        self.java_path_table.setModel(self.java_path_model)
+        self.java_path_table.setRootIsDecorated(False)
+        layout.addWidget(self.java_path_table, 2, 0, 1, 2)
+        
+        btn_add_java = QPushButton("Add Java Path")
+        btn_add_java.clicked.connect(self.add_java_path)
+        layout.addWidget(btn_add_java, 3, 0)
+        
+        btn_remove_java = QPushButton("Remove Selected")
+        btn_remove_java.clicked.connect(self.remove_java_path)
+        layout.addWidget(btn_remove_java, 3, 1)
+        
+        # Save Button
+        btn_save = QPushButton("Save Settings")
+        btn_save.clicked.connect(self.save_api_keys)
+        layout.addWidget(btn_save, 4, 0, 1, 2)
+    
     def setup_update_tab(self, parent):
         """Setup server update management tab"""
         layout = QVBoxLayout(parent)
@@ -1320,52 +1466,714 @@ class ServerManager(QMainWindow):
         btn_check.clicked.connect(self.check_for_updates)
         btn_update.clicked.connect(self.update_server)
         btn_rollback.clicked.connect(self.rollback_version)
+    
+    def create_url_section(self, target_type):
+        """Create URL install section for mods/plugins"""
+        url_layout = QVBoxLayout()
+        url_layout.setContentsMargins(0, 2, 0, 2)
+        url_layout.setSpacing(3)
+        
+        url_input = QTextEdit()
+        url_input.setPlaceholderText(f"Paste {target_type} URLs (one per line)...")
+        url_input.setMaximumHeight(60)
+        url_input.setStyleSheet("padding: 2px;")
+        
+        progress = QProgressBar()
+        progress.setFixedHeight(20)
+        status = QLabel()
+        status.setFixedHeight(18)
+        
+        install_btn = QPushButton(f"Install {target_type.capitalize()}")
+        install_btn.clicked.connect(lambda _, tt=target_type: self.start_url_install(tt))
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.cancel_url_install)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addWidget(install_btn)
+        btn_layout.addWidget(cancel_btn)
+        
+        url_layout.addWidget(QLabel(f"Install from URLs:"))
+        url_layout.addWidget(url_input)
+        url_layout.addWidget(progress)
+        url_layout.addWidget(status)
+        url_layout.addLayout(btn_layout)
+        
+        setattr(self, f"{target_type}_url_input", url_input)
+        setattr(self, f"{target_type}_progress", progress)
+        setattr(self, f"{target_type}_status", status)
+        
+        return url_layout
+    
+    def setup_shortcuts(self):
+        """Setup keyboard shortcuts"""
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_file_view)
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.close)
+        QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(self.create_backup)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_server_properties)
+    
+    # ================================================
+    # SERVER MANAGEMENT METHODS
+    # ================================================
+    
+    def check_java(self):
+        """Check for Java installations"""
+        try:
+            # Try to detect Java from configured paths first
+            java_paths = self.api_keys.get('java_paths', {})
+            for version, path in java_paths.items():
+                if os.path.exists(path):
+                    self.java_combo.setCurrentText(version)
+                    return
+            
+            # Run java -version and capture output
+            result = subprocess.run(
+                ['java', '-version'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Java outputs version to stderr
+                text=True,
+                check=False,
+                timeout=5
+            )
+            
+            version_info = result.stdout or result.stderr
+            
+            if DEBUG_MODE:
+                print(f"Java version output: {repr(version_info)}")
+                logging.info(f"Java version output: {repr(version_info)}")
+            
+            # Robust regex for various Java version formats
+            version_match = re.search(
+                r'version\s+"?(\d+(?:\.\d+)*[^"\s]*)', 
+                version_info, 
+                re.IGNORECASE
+            )
+            
+            if version_match:
+                version_str = version_match.group(1)
+                if DEBUG_MODE:
+                    print(f"Extracted version string: {version_str}")
+                
+                # Extract major version
+                if version_str.startswith("1."):
+                    major_version = version_str.split('.')[1]
+                else:
+                    major_version = version_str.split('.')[0]
+                
+                # Clean up non-digit characters
+                major_version = ''.join(filter(str.isdigit, major_version))
+                
+                if DEBUG_MODE:
+                    print(f"Extracted major version: {major_version}")
+                
+                if major_version in self.java_versions:
+                    self.java_combo.setCurrentText(major_version)
+                    if DEBUG_MODE:
+                        print(f"Java version {major_version} selected")
+                    return
+                else:
+                    if DEBUG_MODE:
+                        print(f"Java version {major_version} not in supported list: {self.java_versions}")
+            
+            # Fallback to first Java version in the list
+            self.java_combo.setCurrentIndex(0)
+            self.show_info("Java installation found but version could not be determined. Using default.")
+            
+        except Exception as e:
+            # Java command not found
+            self.show_error(f"Java runtime not found! Install Java 8+ first. Error: {str(e)}")
+            if DEBUG_MODE:
+                print(f"Java check error: {str(e)}")
+            # Fallback to first Java version in the list
+            self.java_combo.setCurrentIndex(0)
+    
+    def refresh_file_view(self):
+        """Refresh file browser view"""
+        if self.current_server:
+            server_path = self.servers[self.current_server]['path']
+            self.file_view.setRootIndex(self.file_model.index(server_path))
+    
+    def load_profiles(self):
+        """Load server profiles from encrypted storage"""
+        try:
+            if os.path.exists(Constants.FILES["PROFILES"]):
+                with open(Constants.FILES["PROFILES"], 'r') as f:
+                    encrypted = f.read()
+                    decrypted = self.secure_settings.decrypt(encrypted)
+                    self.servers = json.loads(decrypted)
+                    for server in self.servers.values():
+                        server['thread'] = None
+                        server['status'] = Constants.SERVER_STATUS["STOPPED"] 
+                    self.update_server_list()
+        except Exception as e:
+            self.show_error(f"Failed to load profiles: {str(e)}")
+    
+    def save_profiles(self):
+        """Save server profiles to encrypted storage"""
+        try:
+            save_data = {name: {k:v for k,v in data.items() if k != 'thread'} 
+                       for name, data in self.servers.items()}
+            encrypted = self.secure_settings.encrypt(json.dumps(save_data))
+            with open(Constants.FILES["PROFILES"], 'w') as f:
+                f.write(encrypted)
+        except Exception as e:
+            self.show_error(f"Failed to save profiles: {str(e)}")
+    
+    def check_api_keys(self):
+        """Load API keys from secure storage"""
+        try:
+            if os.path.exists(Constants.FILES["SETTINGS"]):
+                with open(Constants.FILES["SETTINGS"], 'r') as f:
+                    encrypted = f.read()
+                    self.api_keys = json.loads(self.secure_settings.decrypt(encrypted))
+                    self.curseforge_key_input.setText(self.api_keys.get('curseforge', ''))
+                    self.update_java_path_model()
+        except Exception as e:
+            logging.error(f"Secure load failed: {str(e)}")
+    
+    def save_api_keys(self):
+        """Save API keys to secure storage"""
+        self.api_keys['curseforge'] = self.curseforge_key_input.text()
+        try:
+            encrypted = self.secure_settings.encrypt(json.dumps(self.api_keys))
+            with open(Constants.FILES["SETTINGS"], 'w') as f:
+                f.write(encrypted)
+            self.statusBar().showMessage("Settings saved", 3000)
+        except Exception as e:
+            logging.error(f"Settings save failed: {str(e)}")
+            QMessageBox.critical(self, "Error", "Failed to save settings")
+    
+    def update_java_path_model(self):
+        """Update Java path table model"""
+        self.java_path_model.clear()
+        self.java_path_model.setHorizontalHeaderLabels(["Version", "Path"])
+        for version, path in self.api_keys.get('java_paths', {}).items():
+            version_item = QStandardItem(version)
+            path_item = QStandardItem(path)
+            self.java_path_model.appendRow([version_item, path_item])
+    
+    def add_java_path(self):
+        """Add new Java path to configuration"""
+        version, ok1 = QInputDialog.getText(self, "Java Version", "Enter Java version (e.g., 8, 11, 17):")
+        if not ok1 or not version:
+            return
+            
+        path, ok2 = QFileDialog.getOpenFileName(
+            self, "Select Java Executable", 
+            "/usr/bin" if platform.system() != "Windows" else "C:\\Program Files\\Java",
+            "Executable Files (*.exe)" if platform.system() == "Windows" else ""
+        )
+        if not ok2 or not path:
+            return
+            
+        self.api_keys.setdefault('java_paths', {})[version] = path
+        self.update_java_path_model()
+    
+    def remove_java_path(self):
+        """Remove selected Java path from configuration"""
+        selected = self.java_path_table.selectionModel().selectedIndexes()
+        if not selected:
+            return
+            
+        row = selected[0].row()
+        version_item = self.java_path_model.item(row, 0)
+        if version_item:
+            version = version_item.text()
+            if version in self.api_keys.get('java_paths', {}):
+                del self.api_keys['java_paths'][version]
+                self.update_java_path_model()
+    
+    def show_info(self, message):
+        """Show informational message"""
+        QMessageBox.information(self, "Success", message)
+        self.statusBar().showMessage(message, 3000)
+    
+    def show_error(self, message):
+        """Show error message"""
+        QMessageBox.critical(self, "Error", message)
+        self.statusBar().showMessage(f"Error: {message}", 5000)
+    
+    def show_search_error(self, message):
+        """Show search error message"""
+        self.progress.hide()
+        self.show_error(f"Search error: {message}")
+    
+    def select_server_directory(self):
+        """Select server directory through dialog"""
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Directory", QDir.homePath(), QFileDialog.ShowDirsOnly
+        )
+        if path:
+            self.server_path.setText(path)
+    
+    def create_new_server(self):
+        """Create a new server"""
+        if not self.server_path.text():
+            self.show_error("Select server directory first!")
+            return
+        
+        name, ok = QInputDialog.getText(self, "Server Name", "Enter server name:")
+        if ok and name:
+            try:
+                self.setup_server(name)
+            except ValueError as e:
+                self.show_error(str(e))
+    
+    def setup_server(self, name):
+        """Setup server files and configuration"""
+        base_dir = self.server_path.text()
+        if not base_dir:
+            base_dir = QDir.homePath()
+        
+        # Sanitize and create directory
+        sanitized_name = sanitize_filename(name)
+        server_dir = os.path.join(base_dir, sanitized_name)
+        
+        try:
+            os.makedirs(server_dir, exist_ok=True)
+            if platform.system() != "Windows":
+                os.chmod(server_dir, 0o755)
+                
+            loader = self.loader_combo.currentText()
+            version = self.version_combo.currentText()
+            jar_path = os.path.join(server_dir, Constants.FILES["SERVER_JAR"])
 
-    def check_for_updates(self):
-        """Check for server updates"""
+            downloader = FileDownloader()
+            if loader == "Vanilla":
+                downloader.download_file(self.get_vanilla_url(version), jar_path)
+            elif loader == "Paper":
+                downloader.download_file(self.get_paper_url(version), jar_path)
+            else:
+                raise ValueError(f"Unsupported loader: {loader}")
+
+            self.create_server_properties(server_dir)
+            self.create_eula_file(server_dir)
+
+            self.servers[name] = {
+                "path": server_dir,
+                "loader": loader,
+                "status": Constants.SERVER_STATUS["STOPPED"],
+                "max_ram": "2G",
+                "mc_version": version,
+                "thread": None
+            }
+            self.save_profiles()
+            self.update_server_list()
+            self.current_server = name
+            self.file_model.setRootPath(server_dir)
+            self.file_view.setRootIndex(self.file_model.index(server_dir))
+            self.load_server_properties()
+            self.show_info(f"Server '{name}' created successfully!")
+            
+        except Exception as e:
+            error_msg = f"Server creation failed: {str(e)}"
+            logging.exception(error_msg)
+            self.show_error(error_msg)
+            if os.path.exists(server_dir):
+                try:
+                    shutil.rmtree(server_dir, ignore_errors=True)
+                except Exception as cleanup_error:
+                    logging.error(f"Cleanup failed: {str(cleanup_error)}")
+    
+    def create_eula_file(self, path):
+        """Create EULA file"""
+        with open(os.path.join(path, Constants.FILES["EULA_FILE"]), 'w') as f:
+            f.write("eula=true\n")
+    
+    def update_versions(self, loader_name):
+        """Update available versions for selected loader"""
+        self.version_combo.clear()
+        self.progress.show()
+        self.statusBar().showMessage("Fetching versions...")
+
+        try:
+            if loader_name == "Vanilla":
+                response = SESSION.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"], timeout=10)
+                versions = [v['id'] for v in response.json()['versions'] if v['type'] == 'release']
+            elif loader_name == "Paper":
+                response = SESSION.get(Constants.API_ENDPOINTS["PAPER_VERSIONS"], timeout=10)
+                paper_data = response.json()
+                valid_versions = [
+                    v for v in reversed(paper_data['versions'])
+                    if re.match(r'^\d+\.\d+(\.\d+)?$', v)  # Improved regex
+                ]
+                if not valid_versions:
+                    raise ValueError("No stable Paper versions available")
+                versions = valid_versions
+            else:
+                versions = ["Version selection not implemented"]
+
+            self.version_combo.addItems(versions)
+            self.progress.hide()
+            self.statusBar().showMessage(f"Loaded {len(versions)} versions", 3000)
+
+        except Exception as e:
+            self.progress.hide()
+            self.show_error(f"Version fetch failed: {str(e)}")
+            self.statusBar().showMessage("Version fetch failed", 3000)
+    
+    def get_vanilla_url(self, version):
+        """Get download URL for Vanilla server"""
+        manifest = SESSION.get(Constants.API_ENDPOINTS["VANILLA_MANIFEST"]).json()
+        for v in manifest['versions']:
+            if v['id'] == version and v['type'] == "release":
+                version_data = SESSION.get(v['url']).json()
+                return version_data['downloads']['server']['url']
+        raise ValueError("Version not found")
+    
+    def get_paper_url(self, version):
+        """Get download URL for Paper server"""
+        try:
+            builds_url = f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/versions/{version}/builds"
+            response = SESSION.get(builds_url, timeout=10)
+            response.raise_for_status()
+            builds_data = response.json()
+    
+            if not builds_data.get('builds'):
+                raise ValueError(f"No builds available for PaperMC {version}")
+    
+            latest_build = builds_data['builds'][-1]
+            build_number = latest_build['build']
+            downloads_data = latest_build['downloads']['application']
+            filename = downloads_data['name']
+            
+            return (
+                f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/"
+                f"versions/{version}/"
+                f"builds/{build_number}/"
+                f"downloads/{filename}"
+            )
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                raise ValueError(f"PaperMC version {version} not found")
+            raise ValueError(f"API request failed: {str(e)}")
+        except KeyError as e:
+            raise ValueError(f"Missing required field in API response: {str(e)}")
+        except json.JSONDecodeError:
+            raise ValueError("Invalid JSON response from PaperMC API")
+    
+    def update_server_list(self):
+        """Update server list display"""
+        self.server_list.clear()
+        for server_name, data in self.servers.items():
+            item = QListWidgetItem(server_name)
+            status = data.get('status', Constants.SERVER_STATUS["STOPPED"])
+            if status == Constants.SERVER_STATUS["RUNNING"]:
+                item.setForeground(Qt.green)
+            elif status == Constants.SERVER_STATUS["STARTING"]:
+                item.setForeground(Qt.yellow)
+            elif status == Constants.SERVER_STATUS["STOPPING"]:
+                item.setForeground(QColor(255, 165, 0))
+            else:
+                item.setForeground(Qt.red)
+            self.server_list.addItem(item)
+    
+    def select_server(self, item):
+        """Select a server from the list"""
+        self.current_server = item.text()
+        if self.current_server in self.servers:
+            server_data = self.servers[self.current_server]
+            self.file_model.setRootPath(server_data['path'])
+            self.file_view.setRootIndex(self.file_model.index(server_data['path']))
+            self.console_output.clear()
+            self.console_buffer = []
+            self.load_server_properties()
+    
+    def on_tab_changed(self, index):
+        """Handle tab change events"""
+        if self.tabs.tabText(index) == "Console":
+            self.command_input.setFocus()
+    
+    # ================================================
+    # SERVER OPERATIONS
+    # ================================================
+    
+    def send_command(self):
+        """Send command to server"""
+        cmd = self.command_input.text().strip()
+        if not cmd or not self.current_server:
+            return
+            
+        # Sanitize command input
+        cmd = sanitize_command(cmd)
+        server = self.servers[self.current_server]
+        
+        if server['status'] == Constants.SERVER_STATUS["RUNNING"]:
+            if server['thread'] and server['thread'].send_command(cmd):
+                self.console_buffer.append(f"> {cmd}")
+                self.update_console_display()
+                self.command_input.clear()
+            else:
+                self.show_error("Failed to send command to server process")
+        else:
+            self.show_error("Server is not running")
+    
+    def update_console_display(self):
+        """Update console display with buffered output"""
+        self.console_output.setPlainText("\n".join(self.console_buffer))
+        self.console_output.verticalScrollBar().setValue(
+            self.console_output.verticalScrollBar().maximum()
+        )
+        self.console_update_timer.stop()
+    
+    def update_server_status(self):
+        """Periodically update server status"""
         if not self.current_server:
             return
             
         server = self.servers[self.current_server]
-        self.update_status.setText("Checking for updates...")
+        path = server['path']
         
+        if server.get('status') == Constants.SERVER_STATUS["STARTING"]:
+            if not self.is_server_process_running(path):
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.update_server_list()
+                self.statusBar().showMessage("Server failed to start", 5000)
+        elif server.get('status') == Constants.SERVER_STATUS["RUNNING"]:
+            if not self.is_server_process_running(path):
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.update_server_list()
+                self.statusBar().showMessage("Server stopped unexpectedly", 5000)
+        elif server.get('status') == Constants.SERVER_STATUS["STOPPING"]:
+            if not self.is_server_process_running(path):
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.update_server_list()
+                self.statusBar().showMessage("Server stopped", 3000)
+    
+    def is_server_process_running(self, server_path):
+        """Check if server process is running"""
+        pid_file = os.path.join(server_path, Constants.FILES["PID_FILE"])
+        if not os.path.exists(pid_file):
+            return False
+            
         try:
-            # Implementation would vary by server type
-            if server['loader'] == "Paper":
-                # Check PaperMC versions
-                pass
-            elif server['loader'] == "Vanilla":
-                # Check Mojang versions
-                pass
-                
-            self.update_status.setText("Update check complete")
-        except Exception as e:
-            self.update_status.setText(f"Error: {str(e)}")
-
-    def update_server(self):
-        """Update server to latest version"""
+            with open(pid_file, 'r') as f:
+                pid = int(f.read().strip())
+            
+            if platform.system() == "Windows":
+                result = subprocess.run(
+                    ['tasklist', '/FI', f'PID eq {pid}'], 
+                    capture_output=True, 
+                    text=True,
+                    shell=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                return str(pid) in result.stdout
+            else:
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                    return True
+                except OSError:
+                    return False
+        except Exception:
+            return False
+    
+    def start_server(self):
+        """Start the selected server"""
+        if self.user_role not in [Constants.USER_ROLES["ADMIN"], Constants.USER_ROLES["OPERATOR"]]:
+            self.show_error("Operator role required to start servers")
+            return
+            
         if not self.current_server:
             return
+        
+        server = self.servers[self.current_server]
+        if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
+            try:
+                jar_path = os.path.join(server['path'], Constants.FILES["SERVER_JAR"])
+                if not os.path.exists(jar_path):
+                    raise FileNotFoundError(f"Server JAR not found at {jar_path}")
+                
+                # Get configured Java path
+                java_version = server.get('java_version', self.java_combo.currentText())
+                java_path = self.api_keys.get('java_paths', {}).get(java_version, "java")
+                
+                command = [
+                    java_path,
+                    f"-Xmx{server.get('max_ram', '2G')}",
+                    "-jar",
+                    jar_path,
+                    "nogui"
+                ]
+                
+                logging.info(f"Starting server with command: {' '.join(command)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Starting server: {' '.join(command)}")
+                
+                server['thread'] = ServerThread(command, server['path'], java_path)
+                server['thread'].output.connect(self.handle_server_output)
+                server['thread'].stopped.connect(self.handle_server_stop)
+                server['thread'].error.connect(self.handle_thread_error)
+                server['thread'].start()
+                
+                # Update status to STARTING
+                server['status'] = Constants.SERVER_STATUS["STARTING"]
+                self.save_profiles()
+                self.update_server_list()
+                self.statusBar().showMessage("Server starting...")
+                
+                # Set start time and timeout timer
+                self.server_start_time = time.time()
+                self.start_timeout_timer.start(120000)  # 2 minutes
+                
+                METRICS['server_starts'].inc()
+                METRICS['current_servers'].inc()
+                
+            except Exception as e:
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.show_error(f"Start failed: {str(e)}")
+                logging.error(f"Start failed: {str(e)}")
+    
+    def handle_server_output(self, message):
+        """Handle output from server process"""
+        self.console_buffer.append(message)
+        if not self.console_update_timer.isActive():
+            self.console_update_timer.start(500)
+        
+        if self.current_server:
+            server = self.servers[self.current_server]
             
-        # Implementation would backup server, download new jar, and update
-        pass
-
-    def rollback_version(self):
-        """Rollback to previous server version"""
-        selected = self.version_list.currentItem()
-        if not selected:
+            # Create a combined view of the last few messages
+            recent_messages = "\n".join(list(self.console_buffer)[-5:])
+            
+            if server['status'] == Constants.SERVER_STATUS["STARTING"]:
+                loader = server.get('loader', '').lower()
+                
+                # Check for any completion indicators
+                completion_indicators = [
+                    "Done (", 
+                    "! For help, type \"help\"",
+                    "For help, type \"help\"",
+                    "Listening on",
+                    "MinecraftForge",
+                    "Quilt Mod Loader version",
+                    "Forge Mod Loader version"
+                ]
+                
+                # Check both the current message and the last few messages combined
+                for indicator in completion_indicators:
+                    if indicator in recent_messages:
+                        if DEBUG_MODE:
+                            print(f"[DEBUG] SERVER READY DETECTED BY INDICATOR: {indicator}")
+                        server['status'] = Constants.SERVER_STATUS["RUNNING"]
+                        self.save_profiles()
+                        self.update_server_list()
+                        self.statusBar().showMessage("Server is running", 3000)
+                        
+                        # Stop the timeout timer
+                        if self.start_timeout_timer.isActive():
+                            self.start_timeout_timer.stop()
+                            if DEBUG_MODE:
+                                print("[DEBUG] Stopped server start timeout timer")
+                        break
+            
+            # Error detection
+            if any(e in message for e in ["ERROR", "Exception", "Crash"]):
+                logging.error(f"Server Error: {message}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Server error detected: {message}")
+                    
+                if server['status'] == Constants.SERVER_STATUS["STARTING"]:
+                    if DEBUG_MODE:
+                        print("[DEBUG] SERVER START FAILED DUE TO ERROR")
+                    server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                    self.save_profiles()
+                    self.update_server_list()
+                    self.statusBar().showMessage("Server failed to start", 5000)
+                    
+                    # Stop the timeout timer
+                    if self.start_timeout_timer.isActive():
+                        self.start_timeout_timer.stop()
+    
+    def handle_thread_error(self, message):
+        """Handle errors from server thread"""
+        if self.current_server:
+            server = self.servers[self.current_server]
+            server['status'] = Constants.SERVER_STATUS["STOPPED"]
+            self.update_server_list()
+            self.show_error(f"Server error: {message}")
+            logging.error(f"Server thread error: {message}")
+            if DEBUG_MODE:
+                print(f"[DEBUG] Server thread error: {message}")
+    
+    def handle_server_stop(self):
+        """Handle server stop event"""
+        if self.current_server:
+            server = self.servers[self.current_server]
+            server['status'] = Constants.SERVER_STATUS["STOPPED"]
+            server['thread'] = None
+            self.save_profiles()
+            self.update_server_list()
+            self.statusBar().showMessage("Server stopped", 3000)
+            if DEBUG_MODE:
+                print(f"[DEBUG] Server stopped: {self.current_server}")
+            METRICS['server_stops'].inc()
+            METRICS['current_servers'].dec()
+    
+    def stop_server(self):
+        """Stop the selected server"""
+        if self.user_role not in [Constants.USER_ROLES["ADMIN"], Constants.USER_ROLES["OPERATOR"]]:
+            self.show_error("Operator role required to stop servers")
             return
             
-        # Implementation would restore from backup
-        pass
-
-    # Other methods follow the same pattern with all security and reliability enhancements applied
-    # Due to space constraints, I've shown key changes rather than repeating the entire 1000+ line code
+        if self.current_server and self.servers[self.current_server]['status'] in [
+            Constants.SERVER_STATUS["RUNNING"], 
+            Constants.SERVER_STATUS["STARTING"]
+        ]:
+            try:
+                server = self.servers[self.current_server]
+                if server['thread']:
+                    server['thread'].stop()
+                server['status'] = Constants.SERVER_STATUS["STOPPING"]
+                self.save_profiles()
+                self.update_server_list()
+                self.statusBar().showMessage("Stopping server...")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Stopping server: {self.current_server}")
+            except Exception as e:
+                self.show_error(f"Stop failed: {str(e)}")
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Stop failed: {str(e)}")
     
-    # ... [rest of the class implementation with all fixes applied] ...
-
+    def delete_server(self):
+        """Delete the selected server"""
+        if self.user_role != Constants.USER_ROLES["ADMIN"]:
+            self.show_error("Admin role required to delete servers")
+            return
+            
+        if not self.current_server:
+            return
+        
+        reply = QMessageBox.question(
+            self, "Delete Server", f"Permanently delete '{self.current_server}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            server_path = self.servers[self.current_server]['path']
+            try:
+                # Stop server if running
+                if self.servers[self.current_server]['status'] != Constants.SERVER_STATUS["STOPPED"]:
+                    self.stop_server()
+                    time.sleep(2)  # Give it a moment to stop
+                
+                if os.path.exists(server_path):
+                    shutil.rmtree(server_path, ignore_errors=True)
+                del self.servers[self.current_server]
+                self.current_server = None
+                self.save_profiles()
+                self.update_server_list()
+                self.statusBar().showMessage("Server deleted", 3000)
+                METRICS['current_servers'].dec()
+            except Exception as e:
+                self.show_error(f"Delete failed: {str(e)}")
+    
     def create_backup(self):
-        """Create server backup with integrity check"""
+        """Create server backup with integrity verification"""
+        if self.user_role not in [Constants.USER_ROLES["ADMIN"], Constants.USER_ROLES["OPERATOR"]]:
+            self.show_error("Operator role required to create backups")
+            return
+            
         if not self.current_server:
             return
             
@@ -1374,49 +2182,765 @@ class ServerManager(QMainWindow):
             backup_manager = BackupManager(server_path)
             backup_path = backup_manager.create_backup()
             
-            # Verify backup integrity
             if backup_manager.verify_backup(backup_path):
                 METRICS['backups_created'].inc()
-                self.show_info(f"Backup created: {os.path.basename(backup_path)}")
+                self.show_info(f"Verified backup created: {os.path.basename(backup_path)}")
             else:
-                self.show_error("Backup verification failed!")
+                self.show_error("Backup verification failed! The backup may be corrupted.")
         except Exception as e:
             self.show_error(f"Backup failed: {str(e)}")
-
-    def start_server(self):
-        """Start the selected server with role check"""
-        if self.user_role not in [Constants.USER_ROLES["ADMIN"], Constants.USER_ROLES["OPERATOR"]]:
-            self.show_error("Operator role required to start servers")
+    
+    def open_file(self, index):
+        """Open selected file"""
+        path = self.file_model.filePath(index)
+        if os.path.isfile(path):
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(path)
+                else:
+                    opener = "open" if platform.system() == "Darwin" else "xdg-open"
+                    subprocess.run([opener, path])
+            except Exception as e:
+                self.show_error(f"Open failed: {str(e)}")
+    
+    def create_server_properties(self, server_dir):
+        """Create server.properties file with secure defaults"""
+        properties_path = os.path.join(server_dir, "server.properties")
+        rcon_password = secrets.token_urlsafe(16)  # Secure RCON password
+        
+        # Encrypt RCON password for storage
+        encrypted_rcon = self.secure_settings.encrypt(rcon_password)
+        
+        with open(properties_path, 'w') as f:
+            f.write("# Minecraft server properties\n")
+            f.write("enable-jmx-monitoring=false\n")
+            f.write(f"rcon.port=25575\n")
+            f.write(f"rcon.password={encrypted_rcon}\n")  # Store encrypted
+            f.write("enable-rcon=false\n")  # Disabled by default
+            f.write("level-seed=\n")
+            f.write("enable-command-block=false\n")
+            f.write("gamemode=survival\n")
+            f.write("enable-query=false\n")
+            f.write("generator-settings={}\n")
+            f.write("level-name=world\n")
+            f.write("motd=A Minecraft Server\n")
+            f.write("query.port=25565\n")
+            f.write("pvp=true\n")
+            f.write("generate-structures=true\n")
+            f.write("difficulty=normal\n")
+            f.write("network-compression-threshold=256\n")
+            f.write("max-tick-time=60000\n")
+            f.write("require-resource-pack=false\n")
+            f.write("use-native-transport=true\n")
+            f.write("max-players=20\n")
+            f.write("online-mode=true\n")  # Enabled by default for security
+            f.write("enable-status=true\n")
+            f.write("allow-flight=false\n")
+            f.write("broadcast-rcon-to-ops=true\n")
+            f.write("view-distance=16\n")
+            f.write("server-ip=\n")
+            f.write("resource-pack-prompt=\n")
+            f.write("allow-nether=true\n")
+            f.write("server-port=25565\n")
+            f.write("sync-chunk-writes=true\n")
+            f.write("op-permission-level=4\n")
+            f.write("prevent-proxy-connections=true\n")  # Security enhancement
+            f.write("hide-online-players=false\n")
+            f.write("resource-pack=\n")
+            f.write("entity-broadcast-range-percentage=100\n")
+            f.write("simulation-distance=16\n")
+            f.write("player-idle-timeout=0\n")
+            f.write("debug=false\n")
+            f.write("force-gamemode=true\n")
+            f.write("rate-limit=0\n")
+            f.write("hardcore=false\n")
+            f.write("white-list=true\n")  # Enabled by default
+            f.write("broadcast-console-to-ops=true\n")
+            f.write("spawn-npcs=true\n")
+            f.write("spawn-animals=true\n")
+            f.write("snooper-enabled=false\n")  # Privacy enhancement
+            f.write("function-permission-level=2\n")
+            f.write("level-type=default\n")
+            f.write("text-filtering-config=\n")
+            f.write("spawn-monsters=true\n")
+            f.write("enforce-whitelist=false\n")
+            f.write("resource-pack-sha1=\n")
+            f.write("spawn-protection=16\n")  # Reasonable default
+            f.write("max-world-size=29999984\n")
+    
+    def load_server_properties(self):
+        """Load server.properties into editor"""
+        if not self.current_server:
             return
             
-        # ... [original start_server implementation] ...
-        METRICS['server_starts'].inc()
-
-    def stop_server(self):
-        """Stop the selected server with role check"""
-        if self.user_role not in [Constants.USER_ROLES["ADMIN"], Constants.USER_ROLES["OPERATOR"]]:
-            self.show_error("Operator role required to stop servers")
+        server = self.servers[self.current_server]
+        prop_file = os.path.join(server['path'], "server.properties")
+        
+        if os.path.exists(prop_file):
+            try:
+                with open(prop_file, 'r') as f:
+                    # Decrypt RCON password for editing
+                    content = f.read()
+                    decrypted_content = re.sub(
+                        r'rcon\.password=(.*)',
+                        lambda m: f"rcon.password={self.secure_settings.decrypt(m.group(1))}",
+                        content
+                    )
+                    self.properties_editor.setPlainText(decrypted_content)
+            except Exception as e:
+                self.show_error(f"Failed to load properties: {str(e)}")
+    
+    def save_server_properties(self):
+        """Save server.properties from editor"""
+        if not self.current_server:
             return
             
-        # ... [original stop_server implementation] ...
-        METRICS['server_stops'].inc()
-
-    def delete_server(self):
-        """Delete server with role check"""
-        if self.user_role != Constants.USER_ROLES["ADMIN"]:
-            self.show_error("Admin role required to delete servers")
+        server = self.servers[self.current_server]
+        prop_file = os.path.join(server['path'], "server.properties")
+        
+        try:
+            # Encrypt RCON password before saving
+            content = self.properties_editor.toPlainText()
+            encrypted_content = re.sub(
+                r'rcon\.password=(.*)',
+                lambda m: f"rcon.password={self.secure_settings.encrypt(m.group(1))}",
+                content
+            )
+            
+            with open(prop_file, 'w') as f:
+                f.write(encrypted_content)
+            self.statusBar().showMessage("Properties saved successfully", 3000)
+        except Exception as e:
+            self.show_error(f"Failed to save properties: {str(e)}")
+    
+    # ================================================
+    # MOD AND PLUGIN MANAGEMENT
+    # ================================================
+    
+    def safe_mod_search(self):
+        """Safe mod search with error handling"""
+        platform = self.mods_platform_combo.currentText()
+        query = self.mod_search.text()
+        if not query:
+            return
+        self.progress.show()
+        self.statusBar().showMessage("Searching mods...")
+        try:
+            if platform == "Modrinth":
+                server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
+                self.search_thread = ModSearchThread(
+                    query, 
+                    server_version, 
+                    self.loader_combo.currentText()
+                )
+                self.search_thread.finished.connect(self.show_mods)
+            elif platform == "CurseForge":
+                if not self.api_keys.get('curseforge'):
+                    self.show_error("CurseForge API key required!")
+                    return
+                self.search_thread = CurseForgeSearchThread(
+                    query, 
+                    6, 
+                    self.api_keys['curseforge']
+                )
+                self.search_thread.finished.connect(
+                    lambda data: self.show_mods(self._format_curseforge_results(data)))
+            self.search_thread.error.connect(self.show_search_error)
+            self.search_thread.start()
+        except Exception as e:
+            self.progress.hide()
+            self.show_error(f"Search failed: {str(e)}")
+            
+    def safe_plugin_search(self):
+        """Safe plugin search with error handling"""
+        platform = self.plugins_platform_combo.currentText()
+        query = self.plugin_search.text()
+        if not query:
             return
             
-        # ... [original delete_server implementation] ...
-
+        self.progress.show()
+        self.statusBar().showMessage("Searching plugins...")
+        
+        try:
+            if platform == "CurseForge":
+                if not self.api_keys.get('curseforge'):
+                    self.show_error("CurseForge API key required!")
+                    return
+                self.search_thread = CurseForgeSearchThread(
+                    query, 
+                    5, 
+                    self.api_keys['curseforge']
+                )
+                self.search_thread.finished.connect(
+                    lambda data: self.show_plugins(self._format_curseforge_results(data)))
+            elif platform == "Modrinth":
+                server_version = self.servers[self.current_server]['mc_version'] if self.current_server else None
+                self.search_thread = ModSearchThread(
+                    query, 
+                    server_version, 
+                    "bukkit"
+                )
+                self.search_thread.finished.connect(self.show_plugins)
+            
+            self.search_thread.error.connect(self.show_search_error)
+            self.search_thread.start()
+        except Exception as e:
+            self.progress.hide()
+            self.show_error(f"Search failed: {str(e)}")
+    
+    def _format_curseforge_results(self, results):
+        """Format CurseForge API results for display"""
+        return [{
+            'id': res['id'],
+            'name': res['name'],
+            'description': res.get('summary', 'No description'),
+            'icon_url': res['logo']['url'] if res.get('logo') else None,
+            'versions': res['latestFiles']
+        } for res in results]
+    
+    def show_mods(self, mods):
+        """Display mod search results"""
+        self.clear_layout(self.mod_list_layout)
+        for mod in mods:
+            self.create_resource_card(mod, self.mod_list_layout, self.install_mod)
+        self.mod_list_layout.addStretch()
+        self.progress.hide()
+        self.statusBar().showMessage(f"Found {len(mods)} mods", 3000)
+    
+    def show_plugins(self, plugins):
+        """Display plugin search results"""
+        self.clear_layout(self.plugin_list_layout)
+        for plugin in plugins:
+            self.create_resource_card(plugin, self.plugin_list_layout, self.install_plugin)
+        self.plugin_list_layout.addStretch()
+        self.progress.hide()
+        self.statusBar().showMessage(f"Found {len(plugins)} plugins", 3000)
+    
+    def create_resource_card(self, data, layout, install_handler):
+        """Create resource card for mod/plugin display"""
+        widget = QWidget()
+        widget.setFixedHeight(100)
+        
+        hbox = QHBoxLayout(widget)
+        icon = QLabel()
+        icon.setFixedSize(80, 80)
+        
+        text = QVBoxLayout()
+        title = QLabel(f"<b>{data.get('title', data.get('name'))}</b>")
+        desc = QLabel(data.get('description', 'No description')[:200] + "...")
+        text.addWidget(title)
+        text.addWidget(desc)
+        
+        btn = QPushButton("Install")
+        btn.clicked.connect(lambda _, d=data: install_handler(d))
+        
+        hbox.addWidget(icon)
+        hbox.addLayout(text)
+        hbox.addWidget(btn)
+        layout.addWidget(widget)
+        
+        if data.get('icon_url'):
+            self.load_item_icon(data.get('project_id', data.get('id')), data['icon_url'], icon)
+    
     def load_item_icon(self, item_id, url, target_label):
         """Load item icon using thread pool"""
         runnable = ImageLoaderRunnable(url, item_id)
         runnable.signals.loaded.connect(lambda i, p: self.update_icon(target_label, p))
         self.image_thread_pool.start(runnable)
-
+    
+    def update_icon(self, label, pixmap):
+        """Update icon display"""
+        label.setPixmap(pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    
+    def install_mod(self, mod):
+        """Install selected mod"""
+        self.install_resource(mod, "mods")
+    
+    def install_plugin(self, plugin):
+        """Install selected plugin"""
+        self.install_resource(plugin, "plugins")
+    
+    def install_resource(self, resource, target_type):
+        """Install resource with version selection and security checks"""
+        if self.user_role == Constants.USER_ROLES["USER"]:
+            self.show_error("Operator role required to install resources")
+            return
+            
+        if not self.current_server:
+            self.show_error("Select a server first!")
+            return
+            
+        try:
+            versions = resource.get('versions', [])
+            if not versions:
+                self.show_error("No installable versions found")
+                return
+                
+            dialog = VersionSelectDialog(versions, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+                
+            version = dialog.selected_version()
+            server_path = self.servers[self.current_server]['path']
+            target_dir = os.path.join(server_path, target_type)
+            os.makedirs(target_dir, exist_ok=True)
+            
+            if self.mods_platform_combo.currentText() == "Modrinth":
+                file = version['files'][0]
+                url = file['url']
+                filename = file['filename']
+            else:
+                file = version
+                url = file['downloadUrl']
+                filename = file['fileName']
+            
+            # Sanitize filename
+            filename = re.sub(r'[^\w\-\.]', '_', filename)
+            dest_path = os.path.join(target_dir, filename)
+            
+            # Security check: prevent path traversal
+            if not os.path.realpath(dest_path).startswith(os.path.realpath(target_dir)):
+                raise SecurityError("Invalid file path")
+            
+            if os.path.exists(dest_path):
+                reply = QMessageBox.question(
+                    self, "File Exists", 
+                    f"{filename} already exists. Overwrite?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            
+            downloader = FileDownloader()
+            downloader.download_file(url, dest_path)
+            
+            # Verify file hash if available
+            if 'hashes' in file and 'sha512' in file['hashes']:
+                expected_hash = file['hashes']['sha512']
+                if not self.verify_file_hash(dest_path, expected_hash, 'sha512'):
+                    os.remove(dest_path)
+                    raise SecurityError("File verification failed - hash mismatch")
+            
+            self.show_info(f"Installed {filename}")
+            METRICS['mods_installed'].inc()
+        except SecurityError as e:
+            self.show_error(f"Security error: {str(e)}")
+        except Exception as e:
+            self.show_error(f"Install failed: {str(e)}")
+    
+    def verify_file_hash(self, path, expected_hash, algorithm='sha256'):
+        """Verify file hash matches expected value"""
+        hasher = hashlib.new(algorithm)
+        with open(path, 'rb') as f:
+            while chunk := f.read(8192):
+                hasher.update(chunk)
+        return hasher.hexdigest() == expected_hash
+    
+    def clear_layout(self, layout):
+        """Clear a layout of all widgets"""
+        while layout.count():
+            item = layout.takeAt(0)
+            if widget := item.widget():
+                widget.deleteLater()
+    
+    def start_url_install(self, target_type):
+        """Start URL-based install process"""
+        url_input = getattr(self, f"{target_type}_url_input")
+        urls = [url.strip() for url in url_input.toPlainText().split('\n') if url.strip()]
+        
+        if not urls:
+            self.show_error("No URLs provided!")
+            return
+            
+        if not self.current_server:
+            self.show_error("Select a server first!")
+            return
+            
+        server_path = self.servers[self.current_server]['path']
+        api_key = self.api_keys.get('curseforge', '')
+        
+        progress_bar = getattr(self, f"{target_type}_progress")
+        status_label = getattr(self, f"{target_type}_status")
+        
+        self.install_thread = UrlInstallThread(urls, server_path, api_key, target_type)
+        self.install_thread.progress.connect(
+            lambda val, text: (progress_bar.setValue(val), status_label.setText(text))
+        )
+        self.install_thread.finished.connect(lambda: status_label.setText("Installation completed"))
+        self.install_thread.error.connect(lambda err: status_label.setText(f"Error: {err}"))
+        
+        progress_bar.setValue(0)
+        status_label.setText("Starting installation...")
+        self.install_thread.start()
+    
+    def cancel_url_install(self):
+        """Cancel URL install process"""
+        if hasattr(self, 'install_thread') and self.install_thread.isRunning():
+            self.install_thread.cancel()
+            status_label = getattr(self, f"{self.install_thread.target_type}_status")
+            status_label.setText("Installation cancelled")
+            progress_bar = getattr(self, f"{self.install_thread.target_type}_progress")
+            progress_bar.setValue(0)
+    
+    def check_mod_updates(self):
+        """Check for mod updates"""
+        if not self.current_server:
+            return
+            
+        self.show_info("Mod update check will be implemented in the next version")
+    
+    # ================================================
+    # UPDATE MANAGEMENT
+    # ================================================
+    
+    def check_for_updates(self):
+        """Check for server updates"""
+        if not self.current_server:
+            self.update_status.setText("Select a server first")
+            return
+            
+        server = self.servers[self.current_server]
+        self.update_status.setText("Checking for updates...")
+        self.update_progress.setValue(0)
+        
+        try:
+            current_version = server['mc_version']
+            loader = server['loader']
+            
+            if loader == "Vanilla":
+                self.update_progress.setValue(30)
+                manifest = SESSION.get(
+                    Constants.API_ENDPOINTS["VANILLA_MANIFEST"],
+                    timeout=10
+                ).json()
+                latest_version = manifest['latest']['release']
+                
+                if current_version == latest_version:
+                    self.update_status.setText(f"Server is up-to-date ({current_version})")
+                else:
+                    self.update_status.setText(f"Update available: {latest_version}")
+                    self.latest_version = latest_version
+                    
+            elif loader == "Paper":
+                self.update_progress.setValue(30)
+                response = SESSION.get(
+                    f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/versions/{current_version}",
+                    timeout=10
+                )
+                
+                if response.status_code == 404:
+                    self.update_status.setText(f"Version {current_version} not found in PaperMC")
+                    return
+                    
+                version_data = response.json()
+                builds = version_data['builds']
+                
+                if not builds:
+                    self.update_status.setText(f"No builds available for {current_version}")
+                    return
+                    
+                # Get the latest build number
+                latest_build = max(builds)
+                server_build = server.get('build_number', 0)
+                
+                if server_build and server_build >= latest_build:
+                    self.update_status.setText(f"Server is up-to-date (build {server_build})")
+                else:
+                    self.update_status.setText(f"Update available: build {latest_build}")
+                    self.latest_build = latest_build
+                    self.update_version = current_version
+                    
+            else:
+                self.update_status.setText("Update not supported for this server type")
+                
+            self.update_progress.setValue(100)
+        except Exception as e:
+            self.update_status.setText(f"Error checking updates: {str(e)}")
+            logging.error(f"Update check failed: {str(e)}")
+    
+    def update_server(self):
+        """Update server to latest version"""
+        if not self.current_server:
+            self.update_status.setText("Select a server first")
+            return
+            
+        server = self.servers[self.current_server]
+        loader = server['loader']
+        
+        # Stop server if running
+        if server['status'] != Constants.SERVER_STATUS["STOPPED"]:
+            self.stop_server()
+            self.update_status.setText("Stopping server...")
+            
+            # Wait up to 30 seconds for server to stop
+            start_time = time.time()
+            while time.time() - start_time < 30:
+                if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
+                    break
+                time.sleep(1)
+            else:
+                self.update_status.setText("Server stop timed out")
+                return
+        
+        try:
+            self.update_status.setText("Creating backup...")
+            self.update_progress.setValue(10)
+            
+            # Create backup before updating
+            backup_manager = BackupManager(server['path'])
+            backup_path = backup_manager.create_backup()
+            
+            if not backup_manager.verify_backup(backup_path):
+                self.update_status.setText("Backup verification failed!")
+                return
+                
+            self.update_progress.setValue(30)
+            
+            jar_path = os.path.join(server['path'], Constants.FILES["SERVER_JAR"])
+            downloader = FileDownloader()
+            
+            if loader == "Vanilla":
+                if not hasattr(self, 'latest_version'):
+                    self.check_for_updates()
+                    
+                new_jar_url = self.get_vanilla_url(self.latest_version)
+                downloader.download_file(new_jar_url, jar_path)
+                
+                # Update server version
+                server['mc_version'] = self.latest_version
+                self.update_status.setText(f"Updated to {self.latest_version}")
+                
+            elif loader == "Paper":
+                if not hasattr(self, 'latest_build'):
+                    self.check_for_updates()
+                    
+                builds_url = f"{Constants.API_ENDPOINTS['PAPER_VERSIONS']}/versions/{self.update_version}/builds/{self.latest_build}"
+                response = SESSION.get(builds_url, timeout=10)
+                build_data = response.json()
+                downloads_data = build_data['downloads']['application']
+                filename = downloads_data['name']
+                new_jar_url = f"{builds_url}/downloads/{filename}"
+                
+                downloader.download_file(new_jar_url, jar_path)
+                
+                # Update build number
+                server['build_number'] = self.latest_build
+                self.update_status.setText(f"Updated to build {self.latest_build}")
+                
+            else:
+                self.update_status.setText("Update not supported for this server type")
+                return
+                
+            # Add to version history
+            self.add_to_version_history(server, backup_path, "update")
+            
+            self.update_progress.setValue(90)
+            self.save_profiles()
+            self.update_progress.setValue(100)
+            self.show_info("Server updated successfully!")
+            
+        except Exception as e:
+            self.update_status.setText(f"Update failed: {str(e)}")
+            logging.error(f"Server update failed: {str(e)}")
+    
+    def rollback_version(self):
+        """Rollback to previous server version"""
+        selected_item = self.version_list.currentItem()
+        if not selected_item:
+            self.update_status.setText("Select a version to rollback")
+            return
+            
+        server = self.servers[self.current_server]
+        data = selected_item.data(Qt.UserRole)
+        
+        # Stop server if running
+        if server['status'] != Constants.SERVER_STATUS["STOPPED"]:
+            self.stop_server()
+            self.update_status.setText("Stopping server...")
+            
+            # Wait up to 30 seconds for server to stop
+            start_time = time.time()
+            while time.time() - start_time < 30:
+                if server['status'] == Constants.SERVER_STATUS["STOPPED"]:
+                    break
+                time.sleep(1)
+            else:
+                self.update_status.setText("Server stop timed out")
+                return
+                
+        try:
+            self.update_status.setText("Restoring backup...")
+            self.update_progress.setValue(10)
+            
+            backup_path = data['backup_path']
+            backup_manager = BackupManager(server['path'])
+            
+            # Verify backup integrity
+            if not backup_manager.verify_backup(backup_path):
+                self.update_status.setText("Backup verification failed!")
+                return
+                
+            # Extract backup
+            with zipfile.ZipFile(backup_path, 'r') as zip_ref:
+                zip_ref.extractall(server['path'])
+                
+            # Restore server state
+            server['mc_version'] = data['version']
+            if 'build_number' in data:
+                server['build_number'] = data['build_number']
+            else:
+                if 'build_number' in server:
+                    del server['build_number']
+                    
+            self.update_progress.setValue(70)
+            
+            # Add to version history
+            self.add_to_version_history(server, backup_path, "rollback")
+            
+            self.update_progress.setValue(90)
+            self.save_profiles()
+            self.update_progress.setValue(100)
+            self.update_status.setText(f"Rolled back to {data['version']}")
+            self.show_info("Server rolled back successfully!")
+            
+        except Exception as e:
+            self.update_status.setText(f"Rollback failed: {str(e)}")
+            logging.error(f"Server rollback failed: {str(e)}")
+    
+    def add_to_version_history(self, server, backup_path, action_type):
+        """Add entry to version history"""
+        history_file = os.path.join(server['path'], "version_history.json")
+        history = []
+        
+        if os.path.exists(history_file):
+            try:
+                with open(history_file, 'r') as f:
+                    history = json.load(f)
+            except Exception:
+                pass
+                
+        entry = {
+            "version": server['mc_version'],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "action": action_type,
+            "backup_path": backup_path
+        }
+        
+        if 'build_number' in server:
+            entry['build_number'] = server['build_number']
+            
+        history.append(entry)
+        
+        # Keep only the last 10 entries
+        if len(history) > 10:
+            history = history[-10:]
+            
+        with open(history_file, 'w') as f:
+            json.dump(history, f, indent=2)
+            
+        self.load_version_history()
+    
+    def load_version_history(self):
+        """Load version history into list widget"""
+        if not self.current_server:
+            return
+            
+        server = self.servers[self.current_server]
+        history_file = os.path.join(server['path'], "version_history.json")
+        self.version_list.clear()
+        
+        if not os.path.exists(history_file):
+            return
+            
+        try:
+            with open(history_file, 'r') as f:
+                history = json.load(f)
+                
+            # Show in reverse chronological order (newest first)
+            for entry in reversed(history):
+                version_text = entry['version']
+                if 'build_number' in entry:
+                    version_text += f" (build {entry['build_number']})"
+                    
+                timestamp = entry['timestamp']
+                action = entry['action'].capitalize()
+                
+                item_text = f"{version_text} - {timestamp} [{action}]"
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.UserRole, entry)
+                
+                # Color code based on action
+                if entry['action'] == "update":
+                    item.setForeground(QColor(100, 200, 100))  # Green
+                elif entry['action'] == "rollback":
+                    item.setForeground(QColor(200, 100, 100))  # Red
+                else:
+                    item.setForeground(QColor(150, 150, 200))  # Blue
+                    
+                self.version_list.addItem(item)
+                
+        except Exception as e:
+            logging.error(f"Failed to load version history: {str(e)}")
+    
+    # ================================================
+    # USER MANAGEMENT AND ACCESS CONTROL
+    # ================================================
+    
+    def update_role_based_ui(self):
+        """Update UI elements based on current user role"""
+        for widget in self.findChildren(RoleBasedButton):
+            widget.update_permissions(self.user_role)
+            
+        for action in self.findChildren(RoleBasedAction):
+            action.update_permissions(self.user_role)
+    
+    def toggle_high_contrast(self, checked):
+        """Toggle high contrast mode"""
+        settings = QSettings()
+        settings.setValue("high_contrast", checked)
+        self.setStyleSheet(self.get_style_sheet())
+    
+    def open_user_manager(self):
+        """Open user manager dialog"""
+        if self.user_role != Constants.USER_ROLES["ADMIN"]:
+            QMessageBox.warning(self, "Permission Denied", "Admin role required")
+            return
+            
+        dialog = UserManagerDialog(self)
+        dialog.exec()
+    
+    # ================================================
+    # SYSTEM EVENTS
+    # ================================================
+    
+    def tray_icon_activated(self, reason):
+        """Handle system tray icon activation"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show()
+    
+    def check_start_timeout(self):
+        """Check if server start has timed out"""
+        if self.current_server:
+            server = self.servers[self.current_server]
+            if server['status'] == Constants.SERVER_STATUS["STARTING"]:
+                # If still in starting state after timeout, mark as stopped
+                elapsed = time.time() - self.server_start_time
+                logging.warning(f"Server start timed out after {elapsed:.1f} seconds")
+                
+                server['status'] = Constants.SERVER_STATUS["STOPPED"]
+                self.save_profiles()
+                self.update_server_list()
+                self.statusBar().showMessage("Server start timed out", 5000)
+                
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Server start timed out after {elapsed:.1f} seconds")
+                
+                # Stop the server thread if it exists
+                if server.get('thread'):
+                    server['thread'].stop()
+    
     def closeEvent(self, event):
-        """Handle application close event"""
+        """Handle application close event with proper cleanup"""
         self.stop_all_threads()
         self.status_timer.stop()
         self.save_profiles()
@@ -1425,9 +2949,14 @@ class ServerManager(QMainWindow):
         # Stop metrics server
         if self.metrics_server:
             self.metrics_server.shutdown()
-            
-        event.accept()
         
+        # Save window state
+        settings = QSettings()
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("windowState", self.saveState())
+        
+        event.accept()
+    
     def stop_all_threads(self):
         """Stop all background threads"""
         if DEBUG_MODE:
@@ -1489,7 +3018,7 @@ if __name__ == "__main__":
     # Check for admin privileges on Windows
     if platform.system() == "Windows":
         try:
-            is_admin = win32security.IsUserAnAdmin()
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         except:
             is_admin = False
             
